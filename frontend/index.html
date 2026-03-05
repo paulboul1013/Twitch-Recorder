@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Twitch Recorder</title>
+  <link rel="stylesheet" href="./styles.css?v=20260303-3" />
+</head>
+
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Monitor and Capture</p>
+        <h1>Twitch Recorder Control Panel</h1>
+        <p class="hero-copy">
+          Add channels, check live status, and review saved recordings from one small dashboard.
+        </p>
+        <div class="hero-summary">
+          <div class="summary-chip">
+            <span id="summaryRecording" class="summary-value">0</span>
+            <span class="summary-label">Recording</span>
+          </div>
+          <div class="summary-chip">
+            <span id="summaryLive" class="summary-value">0</span>
+            <span class="summary-label">Live</span>
+          </div>
+          <div class="summary-chip">
+            <span id="summaryMonitored" class="summary-value">0</span>
+            <span class="summary-label">Monitored</span>
+          </div>
+        </div>
+      </div>
+      <div class="hero-actions">
+        <div class="poller-bar">
+          <button id="togglePolling" class="secondary">Pause Auto Refresh</button>
+          <span id="pollingStatus" class="polling-status">Auto refresh in 15s</span>
+        </div>
+        <button id="refreshAll">Refresh Now</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Monitored Streamers</h2>
+          <span id="streamerCount" class="pill">0</span>
+        </div>
+        <form id="streamerForm" class="stacked-form" onsubmit="return false;">
+          <label>
+            <span>Channel Name</span>
+            <input id="streamerName" name="streamerName" type="text" placeholder="input twitch streamer name"
+              required />
+          </label>
+          <button type="submit">Add Streamer</button>
+        </form>
+        <div id="streamersEmpty" class="empty-state">No monitored channels yet.</div>
+        <ul id="streamersList" class="list"></ul>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Live Status</h2>
+          <button id="refreshStatus" class="secondary">Reload</button>
+        </div>
+        <div id="statusEmpty" class="empty-state">Status appears after the first refresh.</div>
+        <div id="statusCards" class="cards"></div>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-head">
+          <h2>Recordings</h2>
+          <button id="refreshRecordings" class="secondary">Reload</button>
+        </div>
+        <div id="recordingsEmpty" class="empty-state">No recordings saved yet.</div>
+        <div class="table-wrap">
+          <table id="recordingsTable">
+            <thead>
+              <tr>
+                <th>Channel</th>
+                <th>File</th>
+                <th>Size</th>
+                <th>Modified</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" hidden></div>
+  </div>
+
+  <script src="./app.js?v=20260303-3" defer></script>
+</body>
+
+</html>
