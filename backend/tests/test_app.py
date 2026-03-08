@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -71,10 +73,15 @@ def build_test_client(tmp_path: Path):
         yield client
 
 
-def build_test_service(tmp_path: Path, grace_seconds: int = 20) -> MonitorService:
+def build_test_service(
+    tmp_path: Path,
+    grace_seconds: int = 20,
+    start_delay_seconds: int = 15,
+) -> MonitorService:
     settings = Settings(
         poll_interval_seconds=999,
         offline_grace_period_seconds=grace_seconds,
+        recording_start_delay_seconds=start_delay_seconds,
         recordings_path=tmp_path / "recordings",
         config_path=tmp_path / "config",
     )
@@ -172,7 +179,15 @@ def test_stop_recording_updates_status_fields(tmp_path: Path) -> None:
         client.post("/streamers", json={"name": "alpha"})
 
         service: MonitorService = client.app.state.monitor_service
-        with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()):
+        with (
+            patch("app.recorder.subprocess.Popen", return_value=FakeProcess()),
+            patch.object(
+                RecorderManager,
+                "_build_watchable_output",
+                side_effect=lambda self, **kwargs: (str(kwargs["source_path"]), "ready", None, 0),
+                autospec=True,
+            ),
+        ):
             output_path = service.recorder.start_recording("alpha")
             assert output_path.endswith(".mp4")
             Path(output_path).write_bytes(b"video-data")
@@ -378,3 +393,140 @@ def test_active_recording_shows_ad_break_state(tmp_path: Path) -> None:
     alpha = service.list_statuses()[0]
     assert alpha.is_recording is True
     assert alpha.recording_state == "ad_break"
+
+
+def test_auto_start_waits_for_recording_start_delay(tmp_path: Path) -> None:
+    service = build_test_service(tmp_path, start_delay_seconds=15)
+    service._streamers = ["alpha"]
+    service._statuses["alpha"] = StreamStatus(name="alpha")
+
+    class FakeLiveStream:
+        title = "Live now"
+        game_name = "Just Chatting"
+        viewer_count = 10
+        started_at = datetime.now(UTC)
+
+    async def fake_get_live_streams(usernames):
+        return {"alpha": FakeLiveStream()}
+
+    async def fake_get_users(usernames):
+        return {}
+
+    service.twitch_client.get_live_streams = fake_get_live_streams
+    service.twitch_client.get_users = fake_get_users
+
+    with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()) as popen:
+        asyncio.run(service.refresh_once())
+
+    alpha = service.list_statuses()[0]
+    assert popen.call_count == 0
+    assert alpha.is_live is True
+    assert alpha.is_recording is False
+    assert alpha.recording_state == "start_delay"
+
+
+def test_watchable_output_is_rendered_even_without_ad_windows(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    source_path = tmp_path / "sample.mp4"
+    source_path.write_bytes(b"video-data")
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    ended_at = started_at + timedelta(seconds=30)
+
+    def fake_render_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        keep_ranges: list[tuple[float, float]],
+    ) -> None:
+        watchable_path.write_bytes(b"watchable")
+
+    with patch.object(RecorderManager, "_render_watchable", fake_render_watchable):
+        watchable_path, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
+            source_path=source_path,
+            started_at=started_at,
+            ended_at=ended_at,
+            events=[],
+        )
+
+    assert watchable_state == "ready"
+    assert watchable_error is None
+    assert ad_break_count == 0
+    assert watchable_path is not None
+    assert watchable_path.endswith(".watchable.mp4")
+
+
+def test_watchable_output_uses_timed_id3_fallback_for_ad_breaks(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    source_path = tmp_path / "sample.mp4"
+    source_path.write_bytes(b"video-data")
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    ended_at = started_at + timedelta(seconds=30)
+    captured: dict[str, list[tuple[float, float]]] = {}
+
+    def fake_render_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        keep_ranges: list[tuple[float, float]],
+    ) -> None:
+        captured["keep_ranges"] = keep_ranges
+        watchable_path.write_bytes(b"watchable")
+
+    with (
+        patch.object(RecorderManager, "_extract_timed_id3_ad_offsets", return_value=[(0.0, 10.0)]),
+        patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
+    ):
+        _, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
+            source_path=source_path,
+            started_at=started_at,
+            ended_at=ended_at,
+            events=[],
+        )
+
+    assert watchable_state == "ready"
+    assert watchable_error is None
+    assert ad_break_count == 1
+    assert captured["keep_ranges"] == [(10.0, 30.0)]
+
+
+def test_extract_timed_id3_ad_offsets_groups_consecutive_markers() -> None:
+    recorder = RecorderManager(Path("."), ("best",))
+    ffprobe_stdout = """
+[PACKET]
+pts_time=64.000000
+[/PACKET]
+[PACKET]
+pts_time=64.001000
+data=
+00000010: 000b 0000 0363 6f6e 7465 6e74 0061 64    .....content.ad
+[/PACKET]
+[PACKET]
+pts_time=66.001000
+data=
+00000010: 000b 0000 0363 6f6e 7465 6e74 0061 64    .....content.ad
+[/PACKET]
+[PACKET]
+pts_time=120.001000
+data=
+00000010: 000b 0000 0363 6f6e 7465 6e74 0061 64    .....content.ad
+[/PACKET]
+"""
+    ffprobe_result = subprocess.CompletedProcess(
+        args=["ffprobe"],
+        returncode=0,
+        stdout=ffprobe_stdout,
+        stderr="",
+    )
+
+    with patch("app.recorder.subprocess.run", return_value=ffprobe_result):
+        windows = recorder._extract_timed_id3_ad_offsets(Path("sample.mp4"))
+
+    assert len(windows) == 2
+    first_start, first_end = windows[0]
+    second_start, second_end = windows[1]
+    assert round(first_start, 3) == 0.001
+    assert round(first_end, 3) == 4.501
+    assert round(second_start, 3) == 56.001
+    assert round(second_end, 3) == 58.501

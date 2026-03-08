@@ -105,6 +105,18 @@ class MonitorService:
             status.is_recording = True
             status.output_path = self.recorder.current_output_path(name)
 
+    def _start_delay_remaining_seconds(
+        self, stream_started_at: datetime | None, *, now: datetime
+    ) -> int:
+        delay_seconds = self.settings.recording_start_delay_seconds
+        if delay_seconds <= 0 or stream_started_at is None:
+            return 0
+        start_deadline = stream_started_at + timedelta(seconds=delay_seconds)
+        remaining = (start_deadline - now).total_seconds()
+        if remaining <= 0:
+            return 0
+        return int(remaining + 0.999)
+
     async def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._poll_loop())
@@ -162,6 +174,17 @@ class MonitorService:
 
             if not status.is_live:
                 status.last_error = "stream is not live"
+                return StartRecordingResponse(name=normalized, started=False)
+
+            remaining_start_delay = self._start_delay_remaining_seconds(
+                status.started_at,
+                now=datetime.now(UTC),
+            )
+            if remaining_start_delay > 0:
+                status.recording_state = "start_delay"
+                status.last_error = (
+                    f"recording start delay active ({remaining_start_delay}s remaining)"
+                )
                 return StartRecordingResponse(name=normalized, started=False)
 
             if self.recorder.active_count() >= self.settings.max_concurrent_streamers:
@@ -292,6 +315,17 @@ class MonitorService:
                 status.recording_state = "stopped"
                 status.is_recording = False
                 continue
+
+            if not self.recorder.is_recording(name):
+                remaining_start_delay = self._start_delay_remaining_seconds(
+                    live.started_at,
+                    now=now,
+                )
+                if remaining_start_delay > 0:
+                    status.recording_state = "start_delay"
+                    status.is_recording = False
+                    status.last_error = None
+                    continue
 
             can_start = self.recorder.active_count() < self.settings.max_concurrent_streamers
             if not self.recorder.is_recording(name) and can_start:

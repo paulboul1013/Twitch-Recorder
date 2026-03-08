@@ -60,6 +60,7 @@ TWITCH_USER_LOGIN=
 MAX_CONCURRENT_STREAMERS=3
 POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
+RECORDING_START_DELAY_SECONDS=15
 RECORDINGS_PATH=/recordings
 CONFIG_PATH=/config
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
@@ -69,6 +70,7 @@ ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 
 - `TWITCH_USER_OAUTH_TOKEN`：使用者 OAuth Token，用於「登入態錄影」以最佳努力降低廣告與開場等待畫面
 - `TWITCH_USER_LOGIN`：可選，通常填 Twitch 帳號 login；未填時系統會以 token 情境盡力處理
+- `RECORDING_START_DELAY_SECONDS`：主播開播後延遲幾秒才啟動錄影（預設 15 秒），用來避開開場 `Preparing your stream` 畫面
 
 2. 啟動專案
 
@@ -109,6 +111,7 @@ docker compose up -d --build
 - 有設定 `TWITCH_USER_OAUTH_TOKEN`：系統會先嘗試登入態抓流（best-effort），失敗時自動回退
 - 錄影後會做廣告段落偵測，並產生可正常拖曳/播放的 watchable 後處理檔案
 - 錄影列表（API 與前端清單）會顯示 watchable 狀態與廣告段落數（ad break count）
+  - ad break count 優先使用錄製期間事件；若事件為 0，會回退使用檔案內 `timed_id3` 的 `content.ad` 標記估算
 
 ## 常用指令
 

@@ -14,6 +14,7 @@ class Settings:
     max_concurrent_streamers: int = 3
     poll_interval_seconds: int = 30
     offline_grace_period_seconds: int = 20
+    recording_start_delay_seconds: int = 15
     recordings_path: Path = Path("recordings")
     config_path: Path = Path("config")
     preferred_qualities: tuple[str, ...] = ("1080p60", "1080p", "720p60", "best")
@@ -52,6 +53,7 @@ class Settings:
             max_concurrent_streamers=int(os.getenv("MAX_CONCURRENT_STREAMERS", "3")),
             poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),
             offline_grace_period_seconds=int(os.getenv("OFFLINE_GRACE_PERIOD_SECONDS", "20")),
+            recording_start_delay_seconds=int(os.getenv("RECORDING_START_DELAY_SECONDS", "15")),
             recordings_path=recordings_path,
             config_path=config_path,
             preferred_qualities=qualities or cls.preferred_qualities,
