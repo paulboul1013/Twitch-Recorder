@@ -9,6 +9,8 @@ from pathlib import Path
 class Settings:
     twitch_client_id: str = ""
     twitch_client_secret: str = ""
+    twitch_user_oauth_token: str = ""
+    twitch_user_login: str = ""
     max_concurrent_streamers: int = 3
     poll_interval_seconds: int = 30
     offline_grace_period_seconds: int = 20
@@ -45,6 +47,8 @@ class Settings:
         return cls(
             twitch_client_id=os.getenv("TWITCH_CLIENT_ID", ""),
             twitch_client_secret=os.getenv("TWITCH_CLIENT_SECRET", ""),
+            twitch_user_oauth_token=os.getenv("TWITCH_USER_OAUTH_TOKEN", ""),
+            twitch_user_login=os.getenv("TWITCH_USER_LOGIN", ""),
             max_concurrent_streamers=int(os.getenv("MAX_CONCURRENT_STREAMERS", "3")),
             poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),
             offline_grace_period_seconds=int(os.getenv("OFFLINE_GRACE_PERIOD_SECONDS", "20")),

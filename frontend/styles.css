@@ -372,6 +372,16 @@ input {
   color: var(--warn);
 }
 
+.badge.ad-break {
+  background: rgba(197, 61, 27, 0.2);
+  color: #9f260b;
+}
+
+.status-card-ad-break {
+  border-color: rgba(197, 61, 27, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(197, 61, 27, 0.1);
+}
+
 .status-details {
   display: grid;
   gap: 6px;
@@ -381,6 +391,15 @@ input {
 
 .status-details strong {
   color: var(--text);
+}
+
+.status-ad-break-alert {
+  border: 1px solid rgba(197, 61, 27, 0.28);
+  border-radius: 10px;
+  padding: 0.45rem 0.65rem;
+  font-weight: 700;
+  color: #9f260b;
+  background: rgba(197, 61, 27, 0.12);
 }
 
 .empty-state {
@@ -417,6 +436,41 @@ th {
 td code {
   font-family: var(--mono);
   font-size: 0.85rem;
+}
+
+.recording-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.watchable-status {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.28rem 0.62rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.watchable-ready {
+  background: rgba(47, 125, 67, 0.12);
+  color: var(--ok);
+}
+
+.watchable-pending {
+  background: rgba(214, 171, 94, 0.2);
+  color: #7a4b0d;
+}
+
+.watchable-failed {
+  background: rgba(197, 61, 27, 0.16);
+  color: #9f260b;
+}
+
+.ad-break-count {
+  font-family: var(--mono);
 }
 
 .toast {

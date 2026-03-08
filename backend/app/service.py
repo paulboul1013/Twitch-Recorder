@@ -47,8 +47,24 @@ class MonitorService:
         status.stop_after_at = None
         if result.state == "failed":
             status.last_error = f"recording process exited with code {result.exit_code}"
+        elif result.clean_output_state == "failed" and result.clean_output_error:
+            status.last_error = result.clean_output_error
+        else:
+            status.last_error = None
         self.recording_store.upsert(
-            TrackedRecording(channel=result.channel, file_path=str(result.file_path))
+            TrackedRecording(
+                channel=result.channel,
+                source_file_path=str(result.file_path),
+                metadata_path=str(result.metadata_path),
+                watchable_file_path=result.clean_output_path,
+                watchable_state=result.clean_output_state,
+                ad_break_count=result.ad_break_count,
+                source_mode=result.source_mode,
+                started_at=result.started_at.isoformat(),
+                ended_at=result.ended_at.isoformat(),
+                state=result.state,
+                clean_output_error=result.clean_output_error,
+            )
         )
 
     def _sync_finished_recordings(self) -> None:
@@ -60,6 +76,10 @@ class MonitorService:
         current_output_path = self.recorder.current_output_path(status.name)
         if current_output_path is not None:
             status.output_path = current_output_path
+        if status.is_recording and status.recording_state != "grace_period":
+            status.recording_state = (
+                "ad_break" if self.recorder.is_in_ad_break(status.name) else "recording"
+            )
 
     def _handle_offline_recording(self, name: str, status: StreamStatus, now: datetime) -> None:
         if not self.recorder.is_recording(name):
@@ -179,7 +199,7 @@ class MonitorService:
         tracked_recordings = self.recording_store.load()
         existing_files: list[tuple[Path, TrackedRecording]] = []
         for tracked in tracked_recordings:
-            file_path = Path(tracked.file_path)
+            file_path = Path(tracked.source_file_path)
             if file_path.exists() and file_path.is_file():
                 existing_files.append((file_path, tracked))
 
@@ -187,11 +207,30 @@ class MonitorService:
         recordings: list[RecordingInfo] = []
         for file_path, tracked in existing_files:
             stat = file_path.stat()
+            watchable_path = tracked.watchable_file_path
+            watchable_available = False
+            watchable_name: str | None = None
+            if watchable_path:
+                watchable_file = Path(watchable_path)
+                if watchable_file.exists() and watchable_file.is_file():
+                    watchable_available = True
+                    watchable_name = watchable_file.name
+                elif watchable_file == file_path and file_path.exists():
+                    watchable_available = True
+                    watchable_name = file_path.name
             recordings.append(
                 RecordingInfo(
                     channel=tracked.channel,
                     file_path=str(file_path),
                     file_name=file_path.name,
+                    source_file_path=str(file_path),
+                    source_file_name=file_path.name,
+                    watchable_file_path=watchable_path,
+                    watchable_file_name=watchable_name,
+                    watchable_available=watchable_available,
+                    watchable_state=tracked.watchable_state,
+                    ad_break_count=tracked.ad_break_count,
+                    source_mode=tracked.source_mode,
                     size_bytes=stat.st_size,
                     modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
                 )
@@ -272,7 +311,9 @@ class MonitorService:
 
             self._sync_active_recording_fields(status)
             if status.is_recording:
-                status.recording_state = "recording"
+                status.recording_state = (
+                    "ad_break" if self.recorder.is_in_ad_break(name) else "recording"
+                )
 
     async def _poll_loop(self) -> None:
         while True:

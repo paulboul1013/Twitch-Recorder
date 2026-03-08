@@ -165,6 +165,86 @@ function formatState(value) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function isAdBreakState(recordingState) {
+  if (!recordingState) {
+    return false;
+  }
+  return /ad[_\s-]?break/i.test(recordingState);
+}
+
+function formatAdBreakCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count < 0) {
+    return "0";
+  }
+  return String(Math.floor(count));
+}
+
+function getRawFileName(recording) {
+  return recording.source_file_name || recording.file_name || "N/A";
+}
+
+function getWatchableStatus(recording) {
+  const watchableState = String(recording.watchable_state || "").toLowerCase();
+  const watchableAvailable = recording.watchable_available === true;
+  const watchableUnavailable = recording.watchable_available === false;
+  const watchableFileName = recording.watchable_file_name || recording.file_name;
+
+  if (watchableState === "failed" || watchableState === "error") {
+    return {
+      text: "Watchable version failed, raw file still available",
+      tone: "watchable-failed",
+    };
+  }
+
+  if (
+    !watchableAvailable &&
+    (watchableState === "pending" ||
+      watchableState === "processing" ||
+      watchableState === "queued" ||
+      watchableState === "running")
+  ) {
+    return {
+      text: "Processing watchable version",
+      tone: "watchable-pending",
+    };
+  }
+
+  if (
+    watchableAvailable ||
+    watchableState === "available" ||
+    watchableState === "ready" ||
+    watchableState === "completed" ||
+    watchableState === "succeeded" ||
+    watchableState === "success"
+  ) {
+    const fileDetail = watchableFileName ? ` · ${watchableFileName}` : "";
+    return {
+      text: `Available${fileDetail}`,
+      tone: "watchable-ready",
+    };
+  }
+
+  if (watchableUnavailable && !watchableState) {
+    return {
+      text: "Processing watchable version",
+      tone: "watchable-pending",
+    };
+  }
+
+  if (watchableState) {
+    return {
+      text: formatState(watchableState),
+      tone: "watchable-pending",
+    };
+  }
+
+  return {
+    text: "Available · raw file",
+    tone: "watchable-ready",
+  };
+}
+
 function createAvatar(name, profileImageUrl) {
   if (profileImageUrl) {
     const image = document.createElement("img");
@@ -220,8 +300,9 @@ function renderStatuses(statuses) {
   elements.summaryLive.textContent = String(statuses.filter((status) => status.is_live).length);
 
   for (const status of statuses) {
+    const adBreakActive = isAdBreakState(status.recording_state);
     const card = document.createElement("article");
-    card.className = "status-card";
+    card.className = `status-card${adBreakActive ? " status-card-ad-break" : ""}`;
 
     const top = document.createElement("div");
     top.className = "status-top";
@@ -242,6 +323,12 @@ function renderStatuses(statuses) {
       recordingBadge.className = "badge recording";
       recordingBadge.textContent = "RECORDING";
       badges.append(recordingBadge);
+    }
+    if (adBreakActive) {
+      const adBreakBadge = document.createElement("span");
+      adBreakBadge.className = "badge ad-break";
+      adBreakBadge.textContent = "AD BREAK";
+      badges.append(adBreakBadge);
     }
 
     const heading = document.createElement("div");
@@ -336,6 +423,12 @@ function renderStatuses(statuses) {
       <div><strong>Output:</strong> ${status.output_path || "N/A"}</div>
       <div><strong>Error:</strong> ${status.last_error || "None"}</div>
     `;
+    if (adBreakActive) {
+      const adBreakNotice = document.createElement("div");
+      adBreakNotice.className = "status-ad-break-alert";
+      adBreakNotice.textContent = "Ad break in progress";
+      details.prepend(adBreakNotice);
+    }
 
     card.append(top, details);
     elements.statusCards.append(card);
@@ -349,13 +442,37 @@ function renderRecordings(recordings) {
   elements.recordingsTable.hidden = visibleRecordings.length === 0;
 
   for (const recording of visibleRecordings) {
+    const watchableStatus = getWatchableStatus(recording);
     const row = document.createElement("tr");
-    row.innerHTML = `
-      <td class="channel">${recording.channel}</td>
-      <td><code>${recording.file_name}</code></td>
-      <td>${formatBytes(recording.size_bytes)}</td>
-      <td>${formatDate(recording.modified_at)}</td>
-    `;
+    const channelCell = document.createElement("td");
+    channelCell.className = "channel";
+    channelCell.textContent = recording.channel || "N/A";
+
+    const rawFileCell = document.createElement("td");
+    const rawCode = document.createElement("code");
+    rawCode.textContent = getRawFileName(recording);
+    rawFileCell.append(rawCode);
+    if (Number.isFinite(recording.size_bytes)) {
+      const sizeMeta = document.createElement("div");
+      sizeMeta.className = "recording-meta";
+      sizeMeta.textContent = formatBytes(recording.size_bytes);
+      rawFileCell.append(sizeMeta);
+    }
+
+    const watchableCell = document.createElement("td");
+    const watchableLabel = document.createElement("span");
+    watchableLabel.className = `watchable-status ${watchableStatus.tone}`;
+    watchableLabel.textContent = watchableStatus.text;
+    watchableCell.append(watchableLabel);
+
+    const adBreakCell = document.createElement("td");
+    adBreakCell.className = "ad-break-count";
+    adBreakCell.textContent = formatAdBreakCount(recording.ad_break_count);
+
+    const modifiedCell = document.createElement("td");
+    modifiedCell.textContent = formatDate(recording.modified_at);
+
+    row.append(channelCell, rawFileCell, watchableCell, adBreakCell, modifiedCell);
     elements.recordingsBody.append(row);
   }
 }

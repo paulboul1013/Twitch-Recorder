@@ -22,6 +22,7 @@ English users: see [README_EN.md](./README_EN.md).
 - 直播結束後自動停止錄影
 - 查看目前誰正在直播、誰正在錄影
 - 查看已經錄好的影片檔案
+- 廣告緩解流程：可選「登入態錄影」最佳努力抓流 + 廣告段落偵測 + 可觀看檔案後處理
 
 ## 使用前要準備什麼
 
@@ -54,6 +55,8 @@ English users: see [README_EN.md](./README_EN.md).
 ```env
 TWITCH_CLIENT_ID=你的_client_id
 TWITCH_CLIENT_SECRET=你的_client_secret
+TWITCH_USER_OAUTH_TOKEN=
+TWITCH_USER_LOGIN=
 MAX_CONCURRENT_STREAMERS=3
 POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
@@ -61,6 +64,11 @@ RECORDINGS_PATH=/recordings
 CONFIG_PATH=/config
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ```
+
+可選參數（不填也可運作）：
+
+- `TWITCH_USER_OAUTH_TOKEN`：使用者 OAuth Token，用於「登入態錄影」以最佳努力降低廣告與開場等待畫面
+- `TWITCH_USER_LOGIN`：可選，通常填 Twitch 帳號 login；未填時系統會以 token 情境盡力處理
 
 2. 啟動專案
 
@@ -95,6 +103,13 @@ docker compose up -d --build
 
 所有錄影檔都會存在專案裡的 `recordings/` 資料夾。
 
+## 廣告緩解（Hybrid 模式）
+
+- 未設定使用者 token：走一般模式錄影
+- 有設定 `TWITCH_USER_OAUTH_TOKEN`：系統會先嘗試登入態抓流（best-effort），失敗時自動回退
+- 錄影後會做廣告段落偵測，並產生可正常拖曳/播放的 watchable 後處理檔案
+- 錄影列表（API 與前端清單）會顯示 watchable 狀態與廣告段落數（ad break count）
+
 ## 常用指令
 
 啟動：
@@ -117,5 +132,4 @@ docker compose down
 
 ## 目前問題
 - 輸出影片有時會因為長時間關係，用影片播放器會顯示錯誤時間和無法正常滑動時間軸，要用特殊指令轉出復製影片才正常，因為錄製影片格式是MPEG-TS，只是副檔名是.mp4，內部資料才會顯示錯誤
-- 目前twitch自動錄影，會有廣告時間，會影響觀影體驗
 - 開始錄影時會有prepare your stream，會影響錄影時間，考慮優化

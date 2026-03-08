@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
-from dataclasses import dataclass
+import tempfile
+import threading
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .models import RecordingInfo
+
+@dataclass(slots=True)
+class RecordingEvent:
+    type: str
+    at: datetime
+    message: str | None = None
+
+    def as_dict(self) -> dict[str, str]:
+        payload: dict[str, str] = {
+            "type": self.type,
+            "at": self.at.isoformat(),
+        }
+        if self.message:
+            payload["message"] = self.message
+        return payload
 
 
 @dataclass(slots=True)
@@ -13,28 +31,55 @@ class ActiveRecording:
     channel: str
     process: subprocess.Popen[str]
     file_path: Path
+    metadata_path: Path
     started_at: datetime
+    source_mode: str
+    events: list[RecordingEvent] = field(default_factory=list)
+    ad_break_active: bool = False
+    stderr_thread: threading.Thread | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 @dataclass(slots=True)
 class RecordingResult:
     channel: str
     file_path: Path
+    metadata_path: Path
     started_at: datetime
     ended_at: datetime
     exit_code: int
     state: str
+    source_mode: str
+    clean_output_path: str | None
+    clean_output_state: str
+    clean_output_error: str | None
+    ad_break_count: int
 
 
 class RecorderManager:
-    def __init__(self, recordings_path: Path, preferred_qualities: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        recordings_path: Path,
+        preferred_qualities: tuple[str, ...],
+        twitch_user_oauth_token: str = "",
+        twitch_user_login: str = "",
+    ) -> None:
         self.recordings_path = recordings_path
         self.preferred_qualities = preferred_qualities
+        self.twitch_user_oauth_token = twitch_user_oauth_token
+        self.twitch_user_login = twitch_user_login
         self._active: dict[str, ActiveRecording] = {}
 
     def is_recording(self, channel: str) -> bool:
         recording = self._active.get(channel)
         return bool(recording and recording.process.poll() is None)
+
+    def is_in_ad_break(self, channel: str) -> bool:
+        recording = self._active.get(channel)
+        if not recording:
+            return False
+        with recording.lock:
+            return recording.ad_break_active
 
     def current_output_path(self, channel: str) -> str | None:
         recording = self._active.get(channel)
@@ -58,11 +103,10 @@ class RecorderManager:
             if recording is None:
                 continue
             exit_code = recording.process.wait()
+            self._join_stderr_thread(recording)
             finished_results.append(
-                RecordingResult(
-                    channel=channel,
-                    file_path=recording.file_path,
-                    started_at=recording.started_at,
+                self._finalize_recording(
+                    recording=recording,
                     ended_at=datetime.now(UTC),
                     exit_code=exit_code,
                     state="completed" if exit_code == 0 else "failed",
@@ -77,7 +121,9 @@ class RecorderManager:
 
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         output_path = self.recordings_path / f"{channel}_{timestamp}.mp4"
+        metadata_path = output_path.with_suffix(".meta.json")
         quality = ",".join(self.preferred_qualities)
+
         cmd = [
             "streamlink",
             f"https://twitch.tv/{channel}",
@@ -85,13 +131,46 @@ class RecorderManager:
             "-o",
             str(output_path),
         ]
-        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
-        self._active[channel] = ActiveRecording(
+        source_mode = "unauthenticated"
+        if self.twitch_user_oauth_token:
+            cmd.extend(
+                [
+                    "--twitch-api-header",
+                    f"Authorization=OAuth {self.twitch_user_oauth_token}",
+                ]
+            )
+            source_mode = "authenticated"
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+
+        started_at = datetime.now(UTC)
+        recording = ActiveRecording(
             channel=channel,
             process=process,
             file_path=output_path,
-            started_at=datetime.now(UTC),
+            metadata_path=metadata_path,
+            started_at=started_at,
+            source_mode=source_mode,
         )
+        self._append_event(recording, "recording_started", at=started_at)
+        self._write_metadata(
+            recording=recording,
+            ended_at=None,
+            state="recording",
+            clean_output_path=None,
+            clean_output_state="pending",
+            clean_output_error=None,
+        )
+        recording.stderr_thread = self._start_stderr_thread(recording)
+        self._active[channel] = recording
         return str(output_path)
 
     def stop_recording(self, channel: str) -> RecordingResult | None:
@@ -110,10 +189,9 @@ class RecorderManager:
         else:
             exit_code = recording.process.wait()
 
-        return RecordingResult(
-            channel=channel,
-            file_path=recording.file_path,
-            started_at=recording.started_at,
+        self._join_stderr_thread(recording)
+        return self._finalize_recording(
+            recording=recording,
             ended_at=datetime.now(UTC),
             exit_code=exit_code,
             state="stopped",
@@ -123,18 +201,354 @@ class RecorderManager:
         for channel in list(self._active):
             self.stop_recording(channel)
 
-    def list_recordings(self) -> list[RecordingInfo]:
-        files = sorted(self.recordings_path.glob("*.mp4"), key=lambda item: item.stat().st_mtime, reverse=True)
-        results: list[RecordingInfo] = []
-        for file_path in files:
-            stat = file_path.stat()
-            results.append(
-                RecordingInfo(
-                    channel=file_path.stem.split("_", 1)[0],
-                    file_path=str(file_path),
-                    file_name=file_path.name,
-                    size_bytes=stat.st_size,
-                    modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+    def _start_stderr_thread(self, recording: ActiveRecording) -> threading.Thread | None:
+        if recording.process.stderr is None:
+            return None
+        thread = threading.Thread(
+            target=self._consume_stderr,
+            args=(recording,),
+            daemon=True,
+            name=f"streamlink-stderr-{recording.channel}",
+        )
+        thread.start()
+        return thread
+
+    def _join_stderr_thread(self, recording: ActiveRecording) -> None:
+        if recording.stderr_thread is not None:
+            recording.stderr_thread.join(timeout=2)
+        if recording.process.stderr is not None:
+            recording.process.stderr.close()
+
+    def _consume_stderr(self, recording: ActiveRecording) -> None:
+        assert recording.process.stderr is not None
+        for raw_line in recording.process.stderr:
+            line = raw_line.strip()
+            if not line:
+                continue
+            with recording.lock:
+                event_type = self._detect_ad_transition(line, recording.ad_break_active)
+            if event_type == "ad_break_started":
+                self._append_event(recording, "ad_break_started", message=line)
+            elif event_type == "ad_break_ended":
+                self._append_event(recording, "ad_break_ended", message=line)
+
+    def _detect_ad_transition(self, line: str, ad_break_active: bool) -> str | None:
+        lower = line.lower()
+        if any(
+            token in lower
+            for token in (
+                "ad_break_ended",
+                "ad break ended",
+                "commercial break ended",
+                "ads ended",
+                "ads complete",
+                "ad finished",
+            )
+        ):
+            return "ad_break_ended"
+
+        if any(
+            token in lower
+            for token in (
+                "ad_break_started",
+                "ad break started",
+                "commercial break started",
+                "commercial break",
+                "midroll",
+                "mid-roll",
+                "ad break",
+            )
+        ):
+            if any(token in lower for token in ("ended", "finished", "resume", "resuming", "back")):
+                return "ad_break_ended"
+            return "ad_break_started"
+
+        if "discontinuity" in lower and not ad_break_active:
+            return "ad_break_started"
+
+        if ad_break_active and any(
+            token in lower for token in ("resuming stream", "stream resumed", "back to stream", "playback resumed")
+        ):
+            return "ad_break_ended"
+
+        return None
+
+    def _append_event(
+        self,
+        recording: ActiveRecording,
+        event_type: str,
+        *,
+        at: datetime | None = None,
+        message: str | None = None,
+    ) -> None:
+        with recording.lock:
+            if event_type == "ad_break_started":
+                if recording.ad_break_active:
+                    return
+                recording.ad_break_active = True
+            elif event_type == "ad_break_ended":
+                if not recording.ad_break_active:
+                    return
+                recording.ad_break_active = False
+            recording.events.append(
+                RecordingEvent(
+                    type=event_type,
+                    at=at or datetime.now(UTC),
+                    message=message,
                 )
             )
-        return results
+
+    def _finalize_recording(
+        self,
+        recording: ActiveRecording,
+        ended_at: datetime,
+        exit_code: int,
+        state: str,
+    ) -> RecordingResult:
+        with recording.lock:
+            if recording.ad_break_active:
+                recording.events.append(
+                    RecordingEvent(
+                        type="ad_break_ended",
+                        at=ended_at,
+                        message="ad break auto-closed at recording end",
+                    )
+                )
+                recording.ad_break_active = False
+
+            terminal_event = {
+                "stopped": "recording_stopped",
+                "completed": "recording_completed",
+                "failed": "recording_failed",
+            }[state]
+            recording.events.append(RecordingEvent(type=terminal_event, at=ended_at))
+            events_snapshot = list(recording.events)
+
+        clean_output_path, clean_output_state, clean_output_error = self._build_watchable_output(
+            source_path=recording.file_path,
+            started_at=recording.started_at,
+            ended_at=ended_at,
+            events=events_snapshot,
+        )
+        self._write_metadata(
+            recording=recording,
+            ended_at=ended_at,
+            state=state,
+            clean_output_path=clean_output_path,
+            clean_output_state=clean_output_state,
+            clean_output_error=clean_output_error,
+        )
+        return RecordingResult(
+            channel=recording.channel,
+            file_path=recording.file_path,
+            metadata_path=recording.metadata_path,
+            started_at=recording.started_at,
+            ended_at=ended_at,
+            exit_code=exit_code,
+            state=state,
+            source_mode=recording.source_mode,
+            clean_output_path=clean_output_path,
+            clean_output_state=clean_output_state,
+            clean_output_error=clean_output_error,
+            ad_break_count=self._count_ad_breaks(events_snapshot),
+        )
+
+    def _count_ad_breaks(self, events: list[RecordingEvent]) -> int:
+        return sum(1 for event in events if event.type == "ad_break_started")
+
+    def _write_metadata(
+        self,
+        *,
+        recording: ActiveRecording,
+        ended_at: datetime | None,
+        state: str,
+        clean_output_path: str | None,
+        clean_output_state: str,
+        clean_output_error: str | None,
+    ) -> None:
+        with recording.lock:
+            events_payload = [event.as_dict() for event in recording.events]
+        ad_break_count = sum(1 for event in events_payload if event["type"] == "ad_break_started")
+
+        payload = {
+            "channel": recording.channel,
+            "file_path": str(recording.file_path),
+            "started_at": recording.started_at.isoformat(),
+            "ended_at": ended_at.isoformat() if ended_at else None,
+            "state": state,
+            "events": events_payload,
+            "clean_output_path": clean_output_path,
+            "clean_output_state": clean_output_state,
+            "clean_output_error": clean_output_error,
+            "source_mode": recording.source_mode,
+            "ad_break_count": ad_break_count,
+        }
+        recording.metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _build_watchable_output(
+        self,
+        *,
+        source_path: Path,
+        started_at: datetime,
+        ended_at: datetime,
+        events: list[RecordingEvent],
+    ) -> tuple[str | None, str, str | None]:
+        if not source_path.exists():
+            return None, "failed", "source recording file does not exist"
+
+        ad_windows = self._collect_ad_windows(events, ended_at=ended_at)
+        if not ad_windows:
+            return str(source_path), "ready", None
+
+        keep_ranges = self._build_keep_ranges(started_at, ended_at, ad_windows)
+        if not keep_ranges:
+            return None, "failed", "ad windows covered the whole recording duration"
+
+        watchable_path = source_path.with_name(f"{source_path.stem}.watchable{source_path.suffix}")
+        try:
+            self._render_watchable(source_path=source_path, watchable_path=watchable_path, keep_ranges=keep_ranges)
+            return str(watchable_path), "ready", None
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return None, "failed", str(exc)
+
+    def _collect_ad_windows(
+        self, events: list[RecordingEvent], *, ended_at: datetime
+    ) -> list[tuple[datetime, datetime]]:
+        windows: list[tuple[datetime, datetime]] = []
+        ad_started_at: datetime | None = None
+
+        for event in events:
+            if event.type == "ad_break_started":
+                if ad_started_at is None:
+                    ad_started_at = event.at
+            elif event.type == "ad_break_ended":
+                if ad_started_at is None:
+                    continue
+                if event.at > ad_started_at:
+                    windows.append((ad_started_at, event.at))
+                ad_started_at = None
+
+        if ad_started_at is not None and ended_at > ad_started_at:
+            windows.append((ad_started_at, ended_at))
+
+        return windows
+
+    def _build_keep_ranges(
+        self,
+        started_at: datetime,
+        ended_at: datetime,
+        ad_windows: list[tuple[datetime, datetime]],
+    ) -> list[tuple[float, float]]:
+        duration = max(0.0, (ended_at - started_at).total_seconds())
+        if duration <= 0:
+            return []
+
+        clipped: list[tuple[float, float]] = []
+        for ad_start, ad_end in sorted(ad_windows):
+            start_offset = max(0.0, (ad_start - started_at).total_seconds())
+            end_offset = min(duration, (ad_end - started_at).total_seconds())
+            if end_offset <= start_offset:
+                continue
+            clipped.append((start_offset, end_offset))
+
+        if not clipped:
+            return [(0.0, duration)]
+
+        merged: list[tuple[float, float]] = []
+        for start, end in clipped:
+            if not merged:
+                merged.append((start, end))
+                continue
+            prev_start, prev_end = merged[-1]
+            if start <= prev_end:
+                merged[-1] = (prev_start, max(prev_end, end))
+            else:
+                merged.append((start, end))
+
+        keep_ranges: list[tuple[float, float]] = []
+        cursor = 0.0
+        for ad_start, ad_end in merged:
+            if ad_start > cursor:
+                keep_ranges.append((cursor, ad_start))
+            cursor = max(cursor, ad_end)
+        if cursor < duration:
+            keep_ranges.append((cursor, duration))
+
+        return [(start, end) for start, end in keep_ranges if end - start >= 0.25]
+
+    def _render_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        keep_ranges: list[tuple[float, float]],
+    ) -> None:
+        watchable_path.unlink(missing_ok=True)
+        with tempfile.TemporaryDirectory(prefix="watchable_", dir=str(self.recordings_path)) as temp_dir:
+            temp_root = Path(temp_dir)
+            segment_paths: list[Path] = []
+
+            for index, (start_seconds, end_seconds) in enumerate(keep_ranges):
+                segment_path = temp_root / f"segment_{index:03d}.mp4"
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    f"{start_seconds:.3f}",
+                    "-to",
+                    f"{end_seconds:.3f}",
+                    "-i",
+                    str(source_path),
+                    "-c:v",
+                    "libx264",
+                    "-c:a",
+                    "aac",
+                    "-movflags",
+                    "+faststart",
+                    str(segment_path),
+                ]
+                result = subprocess.run(cmd, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr.strip() or "ffmpeg segment render failed")
+                segment_paths.append(segment_path)
+
+            if not segment_paths:
+                raise RuntimeError("no keep ranges were rendered")
+
+            if len(segment_paths) == 1:
+                shutil.move(str(segment_paths[0]), str(watchable_path))
+                return
+
+            concat_file = temp_root / "concat.txt"
+            concat_lines: list[str] = []
+            for segment_path in segment_paths:
+                escaped = str(segment_path).replace("'", "'\\''")
+                concat_lines.append(f"file '{escaped}'\n")
+            concat_file.write_text(
+                "".join(concat_lines),
+                encoding="utf-8",
+            )
+            concat_cmd = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c",
+                "copy",
+                str(watchable_path),
+            ]
+            concat_result = subprocess.run(
+                concat_cmd, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            )
+            if concat_result.returncode != 0:
+                raise RuntimeError(concat_result.stderr.strip() or "ffmpeg concat failed")

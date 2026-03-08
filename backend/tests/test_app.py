@@ -18,8 +18,19 @@ from app.twitch import TwitchClient
 
 
 class FakeProcess:
-    def __init__(self) -> None:
+    class _FakeStderr:
+        def __init__(self, lines: list[str] | None = None) -> None:
+            self._lines = [f"{line}\n" for line in (lines or [])]
+
+        def __iter__(self):
+            return iter(self._lines)
+
+        def close(self) -> None:
+            return None
+
+    def __init__(self, stderr_lines: list[str] | None = None) -> None:
         self.returncode = None
+        self.stderr = self._FakeStderr(stderr_lines)
 
     def poll(self):
         return self.returncode
@@ -100,7 +111,15 @@ def test_recordings_endpoint_lists_saved_files(tmp_path: Path) -> None:
         sample = recordings_dir / "alpha_20250301_120000.mp4"
         sample.write_bytes(b"video-data")
         service: MonitorService = client.app.state.monitor_service
-        service.recording_store.upsert(TrackedRecording(channel="alpha", file_path=str(sample)))
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(sample),
+                watchable_file_path=str(sample),
+                watchable_state="ready",
+                ad_break_count=0,
+            )
+        )
 
         response = client.get("/recordings")
         assert response.status_code == 200
@@ -109,6 +128,10 @@ def test_recordings_endpoint_lists_saved_files(tmp_path: Path) -> None:
         assert len(payload) == 1
         assert payload[0]["channel"] == "alpha"
         assert payload[0]["file_name"] == sample.name
+        assert payload[0]["source_file_name"] == sample.name
+        assert payload[0]["watchable_available"] is True
+        assert payload[0]["watchable_state"] == "ready"
+        assert payload[0]["ad_break_count"] == 0
 
 
 def test_recordings_endpoint_ignores_untracked_mp4_files(tmp_path: Path) -> None:
@@ -152,6 +175,7 @@ def test_stop_recording_updates_status_fields(tmp_path: Path) -> None:
         with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()):
             output_path = service.recorder.start_recording("alpha")
             assert output_path.endswith(".mp4")
+            Path(output_path).write_bytes(b"video-data")
 
             response = client.post("/streamers/alpha/stop")
         assert response.status_code == 200
@@ -166,6 +190,12 @@ def test_stop_recording_updates_status_fields(tmp_path: Path) -> None:
         assert alpha["recording_started_at"] is not None
         assert alpha["recording_ended_at"] is not None
         assert alpha["output_path"] is not None
+
+        recordings = client.get("/recordings")
+        payload = recordings.json()
+        assert len(payload) == 1
+        assert payload[0]["watchable_available"] is True
+        assert payload[0]["watchable_state"] == "ready"
 
 
 def test_start_recording_returns_not_started_when_offline(tmp_path: Path) -> None:
@@ -326,3 +356,25 @@ def test_manual_stop_prevents_immediate_restart_while_stream_is_live(tmp_path: P
 
         service.twitch_client.get_live_streams = fake_get_live_streams
         asyncio.run(service.refresh_once())
+    alpha = service.list_statuses()[0]
+    assert alpha.is_recording is True
+    assert alpha.recording_state == "recording"
+
+
+def test_active_recording_shows_ad_break_state(tmp_path: Path) -> None:
+    service = build_test_service(tmp_path)
+    service._streamers = ["alpha"]
+    service._statuses["alpha"] = StreamStatus(
+        name="alpha",
+        is_live=True,
+        recording_state="recording",
+    )
+    with patch(
+        "app.recorder.subprocess.Popen",
+        return_value=FakeProcess(stderr_lines=["Commercial break started"]),
+    ):
+        service.recorder.start_recording("alpha")
+
+    alpha = service.list_statuses()[0]
+    assert alpha.is_recording is True
+    assert alpha.recording_state == "ad_break"

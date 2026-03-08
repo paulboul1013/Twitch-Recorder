@@ -27,7 +27,12 @@ def build_service(settings: Settings | None = None) -> MonitorService:
     store = StreamerStore(settings.streamers_file)
     recording_store = RecordingHistoryStore(settings.recordings_file)
     twitch_client = TwitchClient(settings.twitch_client_id, settings.twitch_client_secret)
-    recorder = RecorderManager(settings.recordings_path, settings.preferred_qualities)
+    recorder = RecorderManager(
+        settings.recordings_path,
+        settings.preferred_qualities,
+        twitch_user_oauth_token=settings.twitch_user_oauth_token,
+        twitch_user_login=settings.twitch_user_login,
+    )
     return MonitorService(
         settings=settings,
         store=store,

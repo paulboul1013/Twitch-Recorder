@@ -37,6 +37,14 @@ class RecordingInfo(BaseModel):
     channel: str
     file_path: str
     file_name: str
+    source_file_path: str
+    source_file_name: str
+    watchable_file_path: str | None = None
+    watchable_file_name: str | None = None
+    watchable_available: bool = False
+    watchable_state: str = "pending"
+    ad_break_count: int = 0
+    source_mode: str = "unauthenticated"
     size_bytes: int
     modified_at: datetime
 
