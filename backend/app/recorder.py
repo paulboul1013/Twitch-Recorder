@@ -63,11 +63,13 @@ class RecorderManager:
         preferred_qualities: tuple[str, ...],
         twitch_user_oauth_token: str = "",
         twitch_user_login: str = "",
+        watchable_trim_start_seconds: int = 0,
     ) -> None:
         self.recordings_path = recordings_path
         self.preferred_qualities = preferred_qualities
         self.twitch_user_oauth_token = twitch_user_oauth_token
         self.twitch_user_login = twitch_user_login
+        self.watchable_trim_start_seconds = max(0, int(watchable_trim_start_seconds))
         self._active: dict[str, ActiveRecording] = {}
 
     def is_recording(self, channel: str) -> bool:
@@ -414,7 +416,12 @@ class RecorderManager:
                 ended_at=ended_at,
             )
         ad_break_count = len(ad_windows)
-        keep_ranges = self._build_keep_ranges(started_at, ended_at, ad_windows)
+        keep_ranges = self._build_keep_ranges(
+            started_at,
+            ended_at,
+            ad_windows,
+            trim_start_seconds=float(self.watchable_trim_start_seconds),
+        )
         if not keep_ranges:
             return None, "failed", "recording duration too short to produce watchable output", ad_break_count
 
@@ -566,21 +573,23 @@ class RecorderManager:
         started_at: datetime,
         ended_at: datetime,
         ad_windows: list[tuple[datetime, datetime]],
+        trim_start_seconds: float = 0.0,
     ) -> list[tuple[float, float]]:
         duration = max(0.0, (ended_at - started_at).total_seconds())
         if duration <= 0:
             return []
+        trim_start = min(duration, max(0.0, trim_start_seconds))
 
         clipped: list[tuple[float, float]] = []
         for ad_start, ad_end in sorted(ad_windows):
-            start_offset = max(0.0, (ad_start - started_at).total_seconds())
+            start_offset = max(trim_start, (ad_start - started_at).total_seconds())
             end_offset = min(duration, (ad_end - started_at).total_seconds())
             if end_offset <= start_offset:
                 continue
             clipped.append((start_offset, end_offset))
 
         if not clipped:
-            return [(0.0, duration)]
+            return [(trim_start, duration)] if duration - trim_start >= 0.25 else []
 
         merged: list[tuple[float, float]] = []
         for start, end in clipped:
@@ -594,7 +603,7 @@ class RecorderManager:
                 merged.append((start, end))
 
         keep_ranges: list[tuple[float, float]] = []
-        cursor = 0.0
+        cursor = trim_start
         for ad_start, ad_end in merged:
             if ad_start > cursor:
                 keep_ranges.append((cursor, ad_start))

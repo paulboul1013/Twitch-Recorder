@@ -456,6 +456,38 @@ def test_watchable_output_is_rendered_even_without_ad_windows(tmp_path: Path) ->
     assert watchable_path.endswith(".watchable.mp4")
 
 
+def test_watchable_output_applies_trim_start_seconds(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",), watchable_trim_start_seconds=12)
+    source_path = tmp_path / "sample.mp4"
+    source_path.write_bytes(b"video-data")
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    ended_at = started_at + timedelta(seconds=30)
+    captured: dict[str, list[tuple[float, float]]] = {}
+
+    def fake_render_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        keep_ranges: list[tuple[float, float]],
+    ) -> None:
+        captured["keep_ranges"] = keep_ranges
+        watchable_path.write_bytes(b"watchable")
+
+    with patch.object(RecorderManager, "_render_watchable", fake_render_watchable):
+        _, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
+            source_path=source_path,
+            started_at=started_at,
+            ended_at=ended_at,
+            events=[],
+        )
+
+    assert watchable_state == "ready"
+    assert watchable_error is None
+    assert ad_break_count == 0
+    assert captured["keep_ranges"] == [(12.0, 30.0)]
+
+
 def test_watchable_output_uses_timed_id3_fallback_for_ad_breaks(tmp_path: Path) -> None:
     recorder = RecorderManager(tmp_path, ("best",))
     source_path = tmp_path / "sample.mp4"
