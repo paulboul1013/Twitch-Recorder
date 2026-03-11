@@ -17,12 +17,14 @@ English users: see [README_EN.md](./README_EN.md).
 ## 可以做到什麼
 
 - 新增你想監看的 Twitch 主播
+- 從管理畫面刪除主播
 - 自動檢查對方有沒有開播
-- 開播時自動開始錄影
-- 直播結束後自動停止錄影
-- 查看目前誰正在直播、誰正在錄影
-- 查看已經錄好的影片檔案
-- 廣告緩解流程：可選「登入態錄影」最佳努力抓流 + 廣告段落偵測 + 可觀看檔案後處理
+- 開播後依設定延遲幾秒再自動開始錄影，避開開場 `Preparing your stream`
+- 直播結束後保留短暫寬限期，再自動停止錄影
+- 直播中可手動開始或停止錄影
+- 查看目前誰正在直播、誰正在錄影，以及目前錄影狀態
+- 查看最近錄好的影片檔案與 watchable 後處理狀態
+- 廣告緩解流程：可選「登入態錄影」最佳努力抓流 + 廣告段落偵測 + watchable 後處理
 
 ## 使用前要準備什麼
 
@@ -61,6 +63,7 @@ MAX_CONCURRENT_STREAMERS=3
 POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
 RECORDING_START_DELAY_SECONDS=15
+WATCHABLE_TRIM_START_SECONDS=0
 RECORDINGS_PATH=/recordings
 CONFIG_PATH=/config
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
@@ -71,6 +74,7 @@ ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 - `TWITCH_USER_OAUTH_TOKEN`：使用者 OAuth Token，用於「登入態錄影」以最佳努力降低廣告與開場等待畫面
 - `TWITCH_USER_LOGIN`：可選，通常填 Twitch 帳號 login；未填時系統會以 token 情境盡力處理
 - `RECORDING_START_DELAY_SECONDS`：主播開播後延遲幾秒才啟動錄影（預設 15 秒），用來避開開場 `Preparing your stream` 畫面
+- `WATCHABLE_TRIM_START_SECONDS`：watchable 檔案固定裁掉開頭秒數（預設 0 秒）；若開場常出現 `Preparing your stream`，可設 `10~20`
 
 2. 啟動專案
 
@@ -86,32 +90,38 @@ docker compose up -d --build
 
 1. 打開管理頁面
 2. 輸入你想監看的 Twitch 主播名稱
-3. 按下新增
-4. 系統會自動定期檢查對方是否開播
-5. 如果主播開播，就會自動開始錄影
-6. 錄好的檔案會存到 `recordings/` 資料夾
+3. 按下新增，主播會被存進監看名單
+4. 系統會依 `POLL_INTERVAL_SECONDS` 自動刷新直播狀態
+5. 如果主播開播，系統會先等待 `RECORDING_START_DELAY_SECONDS`，之後自動開始錄影
+6. 你也可以在直播卡片上手動按 `Start Recording` 或 `Stop Recording`
+7. 主播離線後，系統會依 `OFFLINE_GRACE_PERIOD_SECONDS` 保留寬限期再停止錄影
+8. 錄好的原始檔、watchable 檔和 metadata 會存到專案資料夾
 
 ## 管理畫面可以看到什麼
 
-- 主播目前是否開播
-- 直播標題
-- 遊戲或分類
-- 觀看人數
-- 是否正在錄影
-- 錄影開始時間
-- 錄影輸出檔案位置
+- 頁首摘要：目前錄影中、直播中、監看中的主播數量
+- 監看名單：主播名稱與移除按鈕
+- 直播卡片：頭像、直播狀態、錄影狀態、標題、分類、觀看人數
+- 錄影細節：直播開始時間、最後檢查時間、離線時間、停止截止時間、輸出路徑、錯誤訊息
+- 錄影列表：最新 5 筆錄影的頻道、原始檔名、watchable 狀態、最後修改時間
 
 ## 錄好的影片會放在哪裡
 
-所有錄影檔都會存在專案裡的 `recordings/` 資料夾。
+所有錄影資料都會存在專案根目錄對應的資料夾：
+
+- `recordings/<channel>_<timestamp>.mp4`：原始錄影檔
+- `recordings/<channel>_<timestamp>.watchable.mp4`：可拖曳、可播放的後處理版本
+- `recordings/<channel>_<timestamp>.meta.json`：單次錄影的事件與輸出 metadata
+- `config/streamers.json`：監看名單
+- `config/recordings.json`：錄影歷史索引
 
 ## 廣告緩解（Hybrid 模式）
 
 - 未設定使用者 token：走一般模式錄影
 - 有設定 `TWITCH_USER_OAUTH_TOKEN`：系統會先嘗試登入態抓流（best-effort），失敗時自動回退
-- 錄影後會做廣告段落偵測，並產生可正常拖曳/播放的 watchable 後處理檔案
-- 錄影列表（API 與前端清單）會顯示 watchable 狀態與廣告段落數（ad break count）
-  - ad break count 優先使用錄製期間事件；若事件為 0，會回退使用檔案內 `timed_id3` 的 `content.ad` 標記估算
+- 錄影中會從 `streamlink` 的輸出訊息偵測 ad break；若事件不足，結束後會再用 `timed_id3` 標記回推廣告區段
+- 錄影結束後會產生 watchable 後處理檔案，移除廣告區段，並可選擇裁掉開頭幾秒
+- 前端錄影列表目前顯示 watchable 狀態；`/recordings` API 與 `.meta.json` 仍會保留 `ad_break_count` 和 `source_mode`
 
 ## 常用指令
 
@@ -124,7 +134,19 @@ docker compose up -d --build
 查看執行狀態：
 
 ```bash
-docker compose logs -f
+docker compose ps
+```
+
+查看後端日誌：
+
+```bash
+docker compose logs -f backend
+```
+
+手動刷新容器內的狀態：
+
+```bash
+curl -X POST http://localhost:8000/refresh
 ```
 
 停止：
@@ -133,6 +155,9 @@ docker compose logs -f
 docker compose down
 ```
 
-## 目前問題
-- 輸出影片有時會因為長時間關係，用影片播放器會顯示錯誤時間和無法正常滑動時間軸，要用特殊指令轉出復製影片才正常，因為錄製影片格式是MPEG-TS，只是副檔名是.mp4，內部資料才會顯示錯誤
-- 開始錄影時會有prepare your stream，會影響錄影時間，考慮優化
+
+## 已知限制與調校建議
+
+- 原始錄影檔由 `streamlink` 直接寫出，某些播放器可能把它當成不易拖曳的串流格式；平常播放優先使用 `.watchable.mp4`
+- watchable 版本是在錄影結束後才產生；如果錄影太短，或後處理失敗，原始檔仍會保留，但 watchable 狀態可能顯示失敗
+- 若開場仍常錄到 `Preparing your stream`，先調高 `RECORDING_START_DELAY_SECONDS`；若只想讓可播放版本略過開頭，再調整 `WATCHABLE_TRIM_START_SECONDS`
