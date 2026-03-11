@@ -225,6 +225,7 @@ def test_stop_recording_metadata_includes_streamlink_diagnostics(tmp_path: Path)
 
     with (
         patch("app.recorder.subprocess.Popen", return_value=FakeProcess(stderr_lines=stderr_lines)),
+        patch("app.recorder.time.perf_counter", side_effect=[10.0, 11.25]),
         patch.object(
             RecorderManager,
             "_build_watchable_output",
@@ -241,6 +242,7 @@ def test_stop_recording_metadata_includes_streamlink_diagnostics(tmp_path: Path)
     assert metadata["state"] == "stopped"
     assert metadata["exit_code"] == -15
     assert metadata["streamlink_stderr_tail"] == stderr_lines[-recorder.STDERR_TAIL_MAX_LINES :]
+    assert metadata["watchable_processing_seconds"] == 1.25
 
 
 def test_completed_recording_metadata_includes_streamlink_diagnostics(tmp_path: Path) -> None:
@@ -254,6 +256,7 @@ def test_completed_recording_metadata_includes_streamlink_diagnostics(tmp_path: 
 
     with (
         patch("app.recorder.subprocess.Popen", return_value=process),
+        patch("app.recorder.time.perf_counter", side_effect=[5.0, 20.0, 22.5]),
         patch.object(
             RecorderManager,
             "_build_watchable_output",
@@ -272,6 +275,7 @@ def test_completed_recording_metadata_includes_streamlink_diagnostics(tmp_path: 
     assert metadata["state"] == "completed"
     assert metadata["exit_code"] == 0
     assert metadata["streamlink_stderr_tail"] == stderr_lines
+    assert metadata["watchable_processing_seconds"] == 2.5
 
 
 def test_start_recording_returns_not_started_when_offline(tmp_path: Path) -> None:

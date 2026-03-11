@@ -6,6 +6,7 @@ import statistics
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -173,6 +174,7 @@ class RecorderManager:
             clean_output_path=None,
             clean_output_state="pending",
             clean_output_error=None,
+            watchable_processing_seconds=None,
         )
         recording.stderr_thread = self._start_stderr_thread(recording)
         with self._state_lock:
@@ -400,6 +402,7 @@ class RecorderManager:
             clean_output_path=processing_result.clean_output_path,
             clean_output_state=processing_result.clean_output_state,
             clean_output_error=processing_result.clean_output_error,
+            watchable_processing_seconds=None,
             ad_break_count_override=processing_result.ad_break_count,
         )
         if run_inline:
@@ -414,6 +417,7 @@ class RecorderManager:
             return processing_result
 
         finalize_key = str(recording.file_path)
+        finalization_started_at = time.perf_counter()
 
         def worker() -> None:
             try:
@@ -448,6 +452,10 @@ class RecorderManager:
                     clean_output_path=None,
                     clean_output_state="failed",
                     clean_output_error=error_message,
+                    watchable_processing_seconds=round(
+                        max(0.0, time.perf_counter() - finalization_started_at),
+                        3,
+                    ),
                     ad_break_count_override=result.ad_break_count,
                 )
             self._append_completed_result(result)
@@ -551,6 +559,7 @@ class RecorderManager:
                 state=state,
             )
 
+        processing_started_at = time.perf_counter()
         (
             clean_output_path,
             clean_output_state,
@@ -562,6 +571,7 @@ class RecorderManager:
             ended_at=ended_at,
             events=events_snapshot,
         )
+        watchable_processing_seconds = round(max(0.0, time.perf_counter() - processing_started_at), 3)
         self._write_metadata(
             recording=recording,
             ended_at=ended_at,
@@ -570,6 +580,7 @@ class RecorderManager:
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
             clean_output_error=clean_output_error,
+            watchable_processing_seconds=watchable_processing_seconds,
             ad_break_count_override=resolved_ad_break_count,
         )
         return RecordingResult(
@@ -600,6 +611,7 @@ class RecorderManager:
         clean_output_path: str | None,
         clean_output_state: str,
         clean_output_error: str | None,
+        watchable_processing_seconds: float | None,
         ad_break_count_override: int | None = None,
     ) -> None:
         with recording.lock:
@@ -622,6 +634,7 @@ class RecorderManager:
             "clean_output_path": clean_output_path,
             "clean_output_state": clean_output_state,
             "clean_output_error": clean_output_error,
+            "watchable_processing_seconds": watchable_processing_seconds,
             "source_mode": recording.source_mode,
             "ad_break_count": ad_break_count,
         }
