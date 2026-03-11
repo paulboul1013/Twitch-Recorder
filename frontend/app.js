@@ -165,19 +165,14 @@ function formatState(value) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function isAdBreakState(recordingState) {
+function normalizeRecordingState(recordingState) {
   if (!recordingState) {
-    return false;
+    return recordingState;
   }
-  return /ad[_\s-]?break/i.test(recordingState);
-}
-
-function formatAdBreakCount(value) {
-  const count = Number(value);
-  if (!Number.isFinite(count) || count < 0) {
-    return "0";
+  if (/ad[_\s-]?break/i.test(recordingState)) {
+    return "recording";
   }
-  return String(Math.floor(count));
+  return recordingState;
 }
 
 function getRawFileName(recording) {
@@ -300,9 +295,8 @@ function renderStatuses(statuses) {
   elements.summaryLive.textContent = String(statuses.filter((status) => status.is_live).length);
 
   for (const status of statuses) {
-    const adBreakActive = isAdBreakState(status.recording_state);
     const card = document.createElement("article");
-    card.className = `status-card${adBreakActive ? " status-card-ad-break" : ""}`;
+    card.className = "status-card";
 
     const top = document.createElement("div");
     top.className = "status-top";
@@ -323,12 +317,6 @@ function renderStatuses(statuses) {
       recordingBadge.className = "badge recording";
       recordingBadge.textContent = "RECORDING";
       badges.append(recordingBadge);
-    }
-    if (adBreakActive) {
-      const adBreakBadge = document.createElement("span");
-      adBreakBadge.className = "badge ad-break";
-      adBreakBadge.textContent = "AD BREAK";
-      badges.append(adBreakBadge);
     }
 
     const heading = document.createElement("div");
@@ -409,7 +397,7 @@ function renderStatuses(statuses) {
     const details = document.createElement("div");
     details.className = "status-details";
     details.innerHTML = `
-      <div><strong>Recording State:</strong> ${formatState(status.recording_state)}</div>
+      <div><strong>Recording State:</strong> ${formatState(normalizeRecordingState(status.recording_state))}</div>
       <div><strong>Title:</strong> ${status.title || "N/A"}</div>
       <div><strong>Game:</strong> ${status.game_name || "N/A"}</div>
       <div><strong>Viewers:</strong> ${status.viewer_count ?? "N/A"}</div>
@@ -423,12 +411,6 @@ function renderStatuses(statuses) {
       <div><strong>Output:</strong> ${status.output_path || "N/A"}</div>
       <div><strong>Error:</strong> ${status.last_error || "None"}</div>
     `;
-    if (adBreakActive) {
-      const adBreakNotice = document.createElement("div");
-      adBreakNotice.className = "status-ad-break-alert";
-      adBreakNotice.textContent = "Ad break in progress";
-      details.prepend(adBreakNotice);
-    }
 
     card.append(top, details);
     elements.statusCards.append(card);
@@ -465,14 +447,10 @@ function renderRecordings(recordings) {
     watchableLabel.textContent = watchableStatus.text;
     watchableCell.append(watchableLabel);
 
-    const adBreakCell = document.createElement("td");
-    adBreakCell.className = "ad-break-count";
-    adBreakCell.textContent = formatAdBreakCount(recording.ad_break_count);
-
     const modifiedCell = document.createElement("td");
     modifiedCell.textContent = formatDate(recording.modified_at);
 
-    row.append(channelCell, rawFileCell, watchableCell, adBreakCell, modifiedCell);
+    row.append(channelCell, rawFileCell, watchableCell, modifiedCell);
     elements.recordingsBody.append(row);
   }
 }

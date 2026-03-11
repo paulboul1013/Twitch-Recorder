@@ -372,16 +372,6 @@ input {
   color: var(--warn);
 }
 
-.badge.ad-break {
-  background: rgba(197, 61, 27, 0.2);
-  color: #9f260b;
-}
-
-.status-card-ad-break {
-  border-color: rgba(197, 61, 27, 0.35);
-  box-shadow: inset 0 0 0 1px rgba(197, 61, 27, 0.1);
-}
-
 .status-details {
   display: grid;
   gap: 6px;
@@ -391,15 +381,6 @@ input {
 
 .status-details strong {
   color: var(--text);
-}
-
-.status-ad-break-alert {
-  border: 1px solid rgba(197, 61, 27, 0.28);
-  border-radius: 10px;
-  padding: 0.45rem 0.65rem;
-  font-weight: 700;
-  color: #9f260b;
-  background: rgba(197, 61, 27, 0.12);
 }
 
 .empty-state {
@@ -467,10 +448,6 @@ td code {
 .watchable-failed {
   background: rgba(197, 61, 27, 0.16);
   color: #9f260b;
-}
-
-.ad-break-count {
-  font-family: var(--mono);
 }
 
 .toast {
