@@ -111,18 +111,18 @@ def create_app(service: MonitorService | None = None, enable_background: bool = 
 
     @app.get("/status", response_model=list[StreamStatus])
     async def list_status(monitor_service: MonitorService = Depends(get_service)) -> list[StreamStatus]:
-        return monitor_service.list_statuses()
+        return await monitor_service.list_statuses()
 
     @app.get("/recordings", response_model=list[RecordingInfo])
     async def list_recordings(
         monitor_service: MonitorService = Depends(get_service),
     ) -> list[RecordingInfo]:
-        return monitor_service.list_recordings()
+        return await monitor_service.list_recordings()
 
     @app.post("/refresh", response_model=list[StreamStatus])
     async def refresh(monitor_service: MonitorService = Depends(get_service)) -> list[StreamStatus]:
         await monitor_service.refresh_once()
-        return monitor_service.list_statuses()
+        return await monitor_service.list_statuses()
 
     return app
 

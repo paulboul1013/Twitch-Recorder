@@ -80,9 +80,13 @@ class RecorderManager:
         self.twitch_user_login = twitch_user_login
         self.watchable_trim_start_seconds = max(0, int(watchable_trim_start_seconds))
         self._active: dict[str, ActiveRecording] = {}
+        self._completed_results: list[RecordingResult] = []
+        self._pending_finalizers: dict[str, threading.Thread] = {}
+        self._state_lock = threading.Lock()
 
     def is_recording(self, channel: str) -> bool:
-        recording = self._active.get(channel)
+        with self._state_lock:
+            recording = self._active.get(channel)
         return bool(recording and recording.process.poll() is None)
 
     def is_in_ad_break(self, channel: str) -> bool:
@@ -93,42 +97,27 @@ class RecorderManager:
             return recording.ad_break_active
 
     def current_output_path(self, channel: str) -> str | None:
-        recording = self._active.get(channel)
+        with self._state_lock:
+            recording = self._active.get(channel)
         if not recording:
             return None
         return str(recording.file_path)
 
     def active_count(self) -> int:
-        self.poll()
-        return len(self._active)
+        self._reap_finished_processes()
+        with self._state_lock:
+            return len(self._active)
 
     def poll(self) -> list[RecordingResult]:
-        finished_results: list[RecordingResult] = []
-        finished_channels = [
-            channel
-            for channel, recording in self._active.items()
-            if recording.process.poll() is not None
-        ]
-        for channel in finished_channels:
-            recording = self._active.pop(channel, None)
-            if recording is None:
-                continue
-            exit_code = recording.process.wait()
-            self._join_stderr_thread(recording)
-            finished_results.append(
-                self._finalize_recording(
-                    recording=recording,
-                    ended_at=datetime.now(UTC),
-                    exit_code=exit_code,
-                    state="completed" if exit_code == 0 else "failed",
-                )
-            )
-        return finished_results
+        self._reap_finished_processes()
+        return self._drain_completed_results()
 
     def start_recording(self, channel: str) -> str:
-        self.poll()
-        if channel in self._active:
-            return str(self._active[channel].file_path)
+        self._reap_finished_processes()
+        with self._state_lock:
+            existing = self._active.get(channel)
+            if existing is not None:
+                return str(existing.file_path)
 
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         output_path = self.recordings_path / f"{channel}_{timestamp}.mp4"
@@ -181,12 +170,14 @@ class RecorderManager:
             clean_output_error=None,
         )
         recording.stderr_thread = self._start_stderr_thread(recording)
-        self._active[channel] = recording
+        with self._state_lock:
+            self._active[channel] = recording
         return str(output_path)
 
-    def stop_recording(self, channel: str) -> RecordingResult | None:
-        self.poll()
-        recording = self._active.pop(channel, None)
+    def stop_recording(self, channel: str, *, wait_for_finalize: bool = False) -> RecordingResult | None:
+        self._reap_finished_processes()
+        with self._state_lock:
+            recording = self._active.pop(channel, None)
         if recording is None:
             return None
 
@@ -201,16 +192,79 @@ class RecorderManager:
             exit_code = recording.process.wait()
 
         self._join_stderr_thread(recording)
-        return self._finalize_recording(
+        processing_result = self._start_recording_finalization(
             recording=recording,
             ended_at=datetime.now(UTC),
             exit_code=exit_code,
             state="stopped",
+            run_inline=wait_for_finalize,
         )
+        if wait_for_finalize:
+            completed_results = self.poll()
+            for result in completed_results:
+                if result.file_path == processing_result.file_path:
+                    return result
+        return processing_result
 
-    def stop_all(self) -> None:
-        for channel in list(self._active):
-            self.stop_recording(channel)
+    def stop_all(self, *, wait_for_finalize: bool = False) -> list[RecordingResult]:
+        self._reap_finished_processes()
+        with self._state_lock:
+            active_channels = list(self._active)
+
+        results = [
+            result
+            for channel in active_channels
+            if (result := self.stop_recording(channel, wait_for_finalize=wait_for_finalize)) is not None
+        ]
+        if wait_for_finalize:
+            self.wait_for_pending_finalizations()
+            results.extend(self.poll())
+        return results
+
+    def wait_for_pending_finalizations(self) -> None:
+        while True:
+            with self._state_lock:
+                pending_threads = list(self._pending_finalizers.values())
+            if not pending_threads:
+                return
+            for thread in pending_threads:
+                thread.join()
+
+    def _reap_finished_processes(self) -> None:
+        with self._state_lock:
+            finished_channels = [
+                channel
+                for channel, recording in self._active.items()
+                if recording.process.poll() is not None
+            ]
+            finished_recordings = [
+                self._active.pop(channel)
+                for channel in finished_channels
+                if channel in self._active
+            ]
+
+        for recording in finished_recordings:
+            exit_code = recording.process.wait()
+            self._join_stderr_thread(recording)
+            processing_result = self._start_recording_finalization(
+                recording=recording,
+                ended_at=datetime.now(UTC),
+                exit_code=exit_code,
+                state="completed" if exit_code == 0 else "failed",
+            )
+            self._append_completed_result(processing_result)
+
+    def _append_completed_result(self, result: RecordingResult) -> None:
+        with self._state_lock:
+            self._completed_results.append(result)
+
+    def _drain_completed_results(self) -> list[RecordingResult]:
+        with self._state_lock:
+            if not self._completed_results:
+                return []
+            results = list(self._completed_results)
+            self._completed_results.clear()
+        return results
 
     def _start_stderr_thread(self, recording: ActiveRecording) -> threading.Thread | None:
         if recording.process.stderr is None:
@@ -309,13 +363,104 @@ class RecorderManager:
                 )
             )
 
-    def _finalize_recording(
+    def _start_recording_finalization(
         self,
+        *,
         recording: ActiveRecording,
         ended_at: datetime,
         exit_code: int,
         state: str,
+        run_inline: bool = False,
     ) -> RecordingResult:
+        events_snapshot = self._snapshot_terminal_events(
+            recording=recording,
+            ended_at=ended_at,
+            state=state,
+        )
+        processing_result = self._build_processing_result(
+            recording=recording,
+            ended_at=ended_at,
+            exit_code=exit_code,
+            state=state,
+            events_snapshot=events_snapshot,
+        )
+        self._write_metadata(
+            recording=recording,
+            ended_at=ended_at,
+            state=state,
+            clean_output_path=processing_result.clean_output_path,
+            clean_output_state=processing_result.clean_output_state,
+            clean_output_error=processing_result.clean_output_error,
+            ad_break_count_override=processing_result.ad_break_count,
+        )
+        if run_inline:
+            final_result = self._finalize_recording(
+                recording=recording,
+                ended_at=ended_at,
+                exit_code=exit_code,
+                state=state,
+                events_snapshot=events_snapshot,
+            )
+            self._append_completed_result(final_result)
+            return processing_result
+
+        finalize_key = str(recording.file_path)
+
+        def worker() -> None:
+            try:
+                result = self._finalize_recording(
+                    recording=recording,
+                    ended_at=ended_at,
+                    exit_code=exit_code,
+                    state=state,
+                    events_snapshot=events_snapshot,
+                )
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                error_message = str(exc) or "watchable finalization failed unexpectedly"
+                result = RecordingResult(
+                    channel=recording.channel,
+                    file_path=recording.file_path,
+                    metadata_path=recording.metadata_path,
+                    started_at=recording.started_at,
+                    ended_at=ended_at,
+                    exit_code=exit_code,
+                    state=state,
+                    source_mode=recording.source_mode,
+                    clean_output_path=None,
+                    clean_output_state="failed",
+                    clean_output_error=error_message,
+                    ad_break_count=processing_result.ad_break_count,
+                )
+                self._write_metadata(
+                    recording=recording,
+                    ended_at=ended_at,
+                    state=state,
+                    clean_output_path=None,
+                    clean_output_state="failed",
+                    clean_output_error=error_message,
+                    ad_break_count_override=result.ad_break_count,
+                )
+            self._append_completed_result(result)
+            with self._state_lock:
+                self._pending_finalizers.pop(finalize_key, None)
+
+        thread = threading.Thread(
+            target=worker,
+            daemon=True,
+            name=f"recording-finalize-{recording.channel}",
+        )
+        with self._state_lock:
+            self._pending_finalizers[finalize_key] = thread
+        thread.start()
+        return processing_result
+
+    def _snapshot_terminal_events(
+        self,
+        *,
+        recording: ActiveRecording,
+        ended_at: datetime,
+        state: str,
+    ) -> list[RecordingEvent]:
         with recording.lock:
             if recording.ad_break_active:
                 recording.events.append(
@@ -333,7 +478,47 @@ class RecorderManager:
                 "failed": "recording_failed",
             }[state]
             recording.events.append(RecordingEvent(type=terminal_event, at=ended_at))
-            events_snapshot = list(recording.events)
+            return list(recording.events)
+
+    def _build_processing_result(
+        self,
+        *,
+        recording: ActiveRecording,
+        ended_at: datetime,
+        exit_code: int,
+        state: str,
+        events_snapshot: list[RecordingEvent],
+    ) -> RecordingResult:
+        ad_break_count = self._count_ad_breaks(events_snapshot)
+        return RecordingResult(
+            channel=recording.channel,
+            file_path=recording.file_path,
+            metadata_path=recording.metadata_path,
+            started_at=recording.started_at,
+            ended_at=ended_at,
+            exit_code=exit_code,
+            state=state,
+            source_mode=recording.source_mode,
+            clean_output_path=None,
+            clean_output_state="processing",
+            clean_output_error=None,
+            ad_break_count=ad_break_count,
+        )
+
+    def _finalize_recording(
+        self,
+        recording: ActiveRecording,
+        ended_at: datetime,
+        exit_code: int,
+        state: str,
+        events_snapshot: list[RecordingEvent] | None = None,
+    ) -> RecordingResult:
+        if events_snapshot is None:
+            events_snapshot = self._snapshot_terminal_events(
+                recording=recording,
+                ended_at=ended_at,
+                state=state,
+            )
 
         (
             clean_output_path,

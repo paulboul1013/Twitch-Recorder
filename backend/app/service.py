@@ -35,22 +35,32 @@ class MonitorService:
         self._manually_stopped: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._recorder_lock = asyncio.Lock()
 
     def _apply_recording_result(self, result: RecordingResult) -> None:
-        status = self._statuses.setdefault(result.channel, StreamStatus(name=result.channel))
-        status.is_recording = False
-        status.output_path = str(result.file_path)
-        status.recording_state = result.state
-        status.recording_started_at = result.started_at
-        status.recording_ended_at = result.ended_at
-        status.recording_exit_code = result.exit_code
-        status.stop_after_at = None
-        if result.state == "failed":
-            status.last_error = f"recording process exited with code {result.exit_code}"
-        elif result.clean_output_state == "failed" and result.clean_output_error:
-            status.last_error = result.clean_output_error
-        else:
-            status.last_error = None
+        status = self._statuses.get(result.channel)
+        if status is not None:
+            current_output_path = self.recorder.current_output_path(result.channel)
+            result_output_path = str(result.file_path)
+            is_stale_for_active_status = (
+                self.recorder.is_recording(result.channel)
+                and current_output_path is not None
+                and current_output_path != result_output_path
+            )
+            if not is_stale_for_active_status:
+                status.is_recording = False
+                status.output_path = result_output_path
+                status.recording_state = result.state
+                status.recording_started_at = result.started_at
+                status.recording_ended_at = result.ended_at
+                status.recording_exit_code = result.exit_code
+                status.stop_after_at = None
+                if result.state == "failed":
+                    status.last_error = f"recording process exited with code {result.exit_code}"
+                elif result.clean_output_state == "failed" and result.clean_output_error:
+                    status.last_error = result.clean_output_error
+                else:
+                    status.last_error = None
         self.recording_store.upsert(
             TrackedRecording(
                 channel=result.channel,
@@ -67,9 +77,14 @@ class MonitorService:
             )
         )
 
-    def _sync_finished_recordings(self) -> None:
-        for result in self.recorder.poll():
+    def _apply_finished_recordings(self, results: list[RecordingResult]) -> None:
+        for result in results:
             self._apply_recording_result(result)
+
+    async def _sync_finished_recordings(self) -> None:
+        async with self._recorder_lock:
+            results = self.recorder.poll()
+        self._apply_finished_recordings(results)
 
     def _sync_active_recording_fields(self, status: StreamStatus) -> None:
         status.is_recording = self.recorder.is_recording(status.name)
@@ -81,7 +96,7 @@ class MonitorService:
                 "ad_break" if self.recorder.is_in_ad_break(status.name) else "recording"
             )
 
-    def _handle_offline_recording(self, name: str, status: StreamStatus, now: datetime) -> None:
+    async def _handle_offline_recording(self, name: str, status: StreamStatus, now: datetime) -> None:
         if not self.recorder.is_recording(name):
             status.is_recording = False
             status.stop_after_at = None
@@ -96,7 +111,8 @@ class MonitorService:
         status.recording_state = "grace_period"
 
         if now >= status.stop_after_at:
-            result = self.recorder.stop_recording(name)
+            async with self._recorder_lock:
+                result = self.recorder.stop_recording(name)
             if result is not None:
                 self._apply_recording_result(result)
                 status.recording_state = "stopped"
@@ -127,7 +143,9 @@ class MonitorService:
             with suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
-        self.recorder.stop_all()
+        async with self._recorder_lock:
+            results = self.recorder.stop_all(wait_for_finalize=True)
+        self._apply_finished_recordings(results)
 
     def list_streamers(self) -> list[StreamerInfo]:
         return [StreamerInfo(name=name) for name in self._streamers]
@@ -145,7 +163,8 @@ class MonitorService:
     async def remove_streamer(self, name: str) -> None:
         normalized = name.strip().lower()
         async with self._lock:
-            result = self.recorder.stop_recording(normalized)
+            async with self._recorder_lock:
+                result = self.recorder.stop_recording(normalized)
             if result is not None:
                 self._apply_recording_result(result)
             self._streamers = [streamer for streamer in self._streamers if streamer != normalized]
@@ -156,7 +175,8 @@ class MonitorService:
     async def stop_streamer_recording(self, name: str) -> StopRecordingResponse:
         normalized = name.strip().lower()
         async with self._lock:
-            result = self.recorder.stop_recording(normalized)
+            async with self._recorder_lock:
+                result = self.recorder.stop_recording(normalized)
             if result is None:
                 return StopRecordingResponse(name=normalized, stopped=False)
             self._apply_recording_result(result)
@@ -166,7 +186,7 @@ class MonitorService:
     async def start_streamer_recording(self, name: str) -> StartRecordingResponse:
         normalized = name.strip().lower()
         async with self._lock:
-            self._sync_finished_recordings()
+            await self._sync_finished_recordings()
             status = self._statuses.setdefault(normalized, StreamStatus(name=normalized))
 
             if self.recorder.is_recording(normalized):
@@ -209,8 +229,8 @@ class MonitorService:
             status.is_recording = True
             return StartRecordingResponse(name=normalized, started=True)
 
-    def list_statuses(self) -> list[StreamStatus]:
-        self._sync_finished_recordings()
+    async def list_statuses(self) -> list[StreamStatus]:
+        await self._sync_finished_recordings()
         statuses = []
         for name in sorted(self._statuses):
             status = self._statuses[name]
@@ -218,7 +238,8 @@ class MonitorService:
             statuses.append(status)
         return statuses
 
-    def list_recordings(self) -> list[RecordingInfo]:
+    async def list_recordings(self) -> list[RecordingInfo]:
+        await self._sync_finished_recordings()
         tracked_recordings = self.recording_store.load()
         existing_files: list[tuple[Path, TrackedRecording]] = []
         for tracked in tracked_recordings:
@@ -265,7 +286,7 @@ class MonitorService:
         async with self._lock:
             streamers = list(self._streamers)
 
-        self._sync_finished_recordings()
+        await self._sync_finished_recordings()
         if not streamers:
             return
 
@@ -305,7 +326,7 @@ class MonitorService:
 
             if not live:
                 self._manually_stopped.discard(name)
-                self._handle_offline_recording(name, status, now)
+                await self._handle_offline_recording(name, status, now)
                 continue
 
             status.offline_since = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -237,7 +238,7 @@ def test_offline_recording_enters_grace_period_before_stop(tmp_path: Path) -> No
     service.twitch_client.get_live_streams = fake_get_live_streams
     asyncio.run(service.refresh_once())
 
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert alpha.is_recording is True
     assert alpha.recording_state == "grace_period"
     assert alpha.offline_since is not None
@@ -258,7 +259,7 @@ def test_offline_recording_stops_after_grace_period(tmp_path: Path) -> None:
     service.twitch_client.get_live_streams = fake_get_live_streams
     asyncio.run(service.refresh_once())
 
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert alpha.is_recording is False
     assert alpha.recording_state == "stopped"
     assert alpha.recording_ended_at is not None
@@ -285,7 +286,7 @@ def test_refresh_includes_profile_image_url(tmp_path: Path) -> None:
     service.twitch_client.get_users = fake_get_users
     asyncio.run(service.refresh_once())
 
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert alpha.profile_image_url == "https://example.com/alpha.jpg"
 
 
@@ -311,7 +312,7 @@ def test_live_lookup_failure_does_not_stop_active_recording(tmp_path: Path) -> N
     service.twitch_client.get_users = fake_get_users
     asyncio.run(service.refresh_once())
 
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert alpha.is_recording is True
     assert alpha.recording_state == "recording"
     assert alpha.output_path == output_path
@@ -349,7 +350,7 @@ def test_manual_stop_prevents_immediate_restart_while_stream_is_live(tmp_path: P
 
         asyncio.run(service.refresh_once())
 
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert alpha.is_live is True
     assert alpha.is_recording is False
     assert alpha.recording_state == "stopped"
@@ -358,7 +359,7 @@ def test_manual_stop_prevents_immediate_restart_while_stream_is_live(tmp_path: P
         response = asyncio.run(service.start_streamer_recording("alpha"))
 
     assert response.started is True
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert alpha.is_recording is True
     assert alpha.recording_state == "recording"
 
@@ -371,7 +372,7 @@ def test_manual_stop_prevents_immediate_restart_while_stream_is_live(tmp_path: P
 
         service.twitch_client.get_live_streams = fake_get_live_streams
         asyncio.run(service.refresh_once())
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert alpha.is_recording is True
     assert alpha.recording_state == "recording"
 
@@ -390,7 +391,7 @@ def test_active_recording_shows_ad_break_state(tmp_path: Path) -> None:
     ):
         service.recorder.start_recording("alpha")
 
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert alpha.is_recording is True
     assert alpha.recording_state == "ad_break"
 
@@ -418,7 +419,7 @@ def test_auto_start_waits_for_recording_start_delay(tmp_path: Path) -> None:
     with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()) as popen:
         asyncio.run(service.refresh_once())
 
-    alpha = service.list_statuses()[0]
+    alpha = asyncio.run(service.list_statuses())[0]
     assert popen.call_count == 0
     assert alpha.is_live is True
     assert alpha.is_recording is False
@@ -607,3 +608,147 @@ data=
     assert round(first_end, 3) == 4.501
     assert round(second_start, 3) == 56.001
     assert round(second_end, 3) == 58.501
+
+
+def test_extract_timed_id3_ad_offsets_normalizes_large_pts_jump() -> None:
+    recorder = RecorderManager(Path("."), ("best",))
+    ffprobe_stdout = """
+[PACKET]
+pts_time=4762.066000
+[/PACKET]
+[PACKET]
+pts_time=4764.066000
+[/PACKET]
+[PACKET]
+pts_time=4766.066000
+[/PACKET]
+[PACKET]
+pts_time=95503.718689
+data=
+00000010: 000b 0000 0363 6f6e 7465 6e74 0061 64    .....content.ad
+[/PACKET]
+[PACKET]
+pts_time=95505.718689
+data=
+00000010: 000b 0000 0363 6f6e 7465 6e74 0061 64    .....content.ad
+[/PACKET]
+"""
+    ffprobe_result = subprocess.CompletedProcess(
+        args=["ffprobe"],
+        returncode=0,
+        stdout=ffprobe_stdout,
+        stderr="",
+    )
+
+    with patch("app.recorder.subprocess.run", return_value=ffprobe_result):
+        windows = recorder._extract_timed_id3_ad_offsets(
+            Path("sample.mp4"),
+            expected_duration_seconds=300.0,
+        )
+
+    assert len(windows) == 1
+    start, end = windows[0]
+    assert round(start, 3) == 6.0
+    assert round(end, 3) == 10.5
+
+
+def test_repair_watchable_output_rerenders_when_ocr_finds_ad_overlay(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    watchable_path = tmp_path / "sample.watchable.mp4"
+    watchable_path.write_bytes(b"watchable")
+    captured: dict[str, list[tuple[float, float]]] = {}
+
+    def fake_render_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        keep_ranges: list[tuple[float, float]],
+    ) -> None:
+        captured["keep_ranges"] = keep_ranges
+        watchable_path.write_bytes(b"clean")
+
+    with (
+        patch.object(RecorderManager, "_probe_media_duration", side_effect=[30.0, 26.0]),
+        patch.object(RecorderManager, "_collect_ocr_ad_windows", side_effect=[[(8.0, 12.0)], []]),
+        patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
+    ):
+        repair_error, ad_break_count = recorder._repair_watchable_output(watchable_path)
+
+    assert repair_error is None
+    assert ad_break_count == 1
+    assert captured["keep_ranges"] == [(0.0, 8.0), (12.0, 30.0)]
+    assert watchable_path.read_bytes() == b"clean"
+
+
+def test_stop_recording_returns_processing_before_background_finalize_completes(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    finalize_started = threading.Event()
+    allow_finalize = threading.Event()
+
+    def fake_build_watchable_output(self, **kwargs):
+        finalize_started.set()
+        allow_finalize.wait(timeout=2)
+        return (str(kwargs["source_path"]), "ready", None, 0)
+
+    with (
+        patch("app.recorder.subprocess.Popen", side_effect=[FakeProcess(), FakeProcess()]),
+        patch.object(RecorderManager, "_build_watchable_output", autospec=True, side_effect=fake_build_watchable_output),
+    ):
+        output_path = Path(recorder.start_recording("alpha"))
+        output_path.write_bytes(b"video-data")
+
+        stop_result = recorder.stop_recording("alpha")
+        assert stop_result is not None
+        assert stop_result.clean_output_state == "processing"
+        assert stop_result.clean_output_path is None
+
+        assert finalize_started.wait(timeout=1)
+        assert recorder.poll() == []
+
+        allow_finalize.set()
+        recorder.wait_for_pending_finalizations()
+        completed_results = recorder.poll()
+
+    assert len(completed_results) == 1
+    assert completed_results[0].clean_output_state == "ready"
+    assert completed_results[0].clean_output_path == str(output_path)
+
+
+def test_old_finalize_result_does_not_override_new_active_recording_status(tmp_path: Path) -> None:
+    service = build_test_service(tmp_path, start_delay_seconds=0)
+    service._streamers = ["alpha"]
+    service._statuses["alpha"] = StreamStatus(name="alpha", is_live=True)
+    finalize_started = threading.Event()
+    allow_finalize = threading.Event()
+
+    def fake_build_watchable_output(self, **kwargs):
+        finalize_started.set()
+        allow_finalize.wait(timeout=2)
+        return (str(kwargs["source_path"]), "ready", None, 0)
+
+    with (
+        patch("app.recorder.subprocess.Popen", side_effect=[FakeProcess(), FakeProcess()]),
+        patch.object(RecorderManager, "_build_watchable_output", autospec=True, side_effect=fake_build_watchable_output),
+    ):
+        first_output = Path(service.recorder.start_recording("alpha"))
+        first_output.write_bytes(b"video-data")
+
+        stop_response = asyncio.run(service.stop_streamer_recording("alpha"))
+        assert stop_response.stopped is True
+        assert finalize_started.wait(timeout=1)
+
+        second_response = asyncio.run(service.start_streamer_recording("alpha"))
+        assert second_response.started is True
+        second_output = service.recorder.current_output_path("alpha")
+        assert second_output is not None
+
+        allow_finalize.set()
+        service.recorder.wait_for_pending_finalizations()
+        alpha = asyncio.run(service.list_statuses())[0]
+
+    assert alpha.is_recording is True
+    assert alpha.recording_state == "recording"
+    assert alpha.output_path == second_output
+
+    service.recorder.stop_all(wait_for_finalize=True)
