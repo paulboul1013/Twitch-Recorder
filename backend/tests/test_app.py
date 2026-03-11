@@ -441,7 +441,10 @@ def test_watchable_output_is_rendered_even_without_ad_windows(tmp_path: Path) ->
     ) -> None:
         watchable_path.write_bytes(b"watchable")
 
-    with patch.object(RecorderManager, "_render_watchable", fake_render_watchable):
+    with (
+        patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
+        patch.object(RecorderManager, "_repair_watchable_output", return_value=(None, 0)),
+    ):
         watchable_path, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
             source_path=source_path,
             started_at=started_at,
@@ -474,7 +477,10 @@ def test_watchable_output_applies_trim_start_seconds(tmp_path: Path) -> None:
         captured["keep_ranges"] = keep_ranges
         watchable_path.write_bytes(b"watchable")
 
-    with patch.object(RecorderManager, "_render_watchable", fake_render_watchable):
+    with (
+        patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
+        patch.object(RecorderManager, "_repair_watchable_output", return_value=(None, 0)),
+    ):
         _, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
             source_path=source_path,
             started_at=started_at,
@@ -509,6 +515,7 @@ def test_watchable_output_uses_timed_id3_fallback_for_ad_breaks(tmp_path: Path) 
     with (
         patch.object(RecorderManager, "_extract_timed_id3_ad_offsets", return_value=[(0.0, 10.0)]),
         patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
+        patch.object(RecorderManager, "_repair_watchable_output", return_value=(None, 0)),
     ):
         _, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
             source_path=source_path,
@@ -521,6 +528,44 @@ def test_watchable_output_uses_timed_id3_fallback_for_ad_breaks(tmp_path: Path) 
     assert watchable_error is None
     assert ad_break_count == 1
     assert captured["keep_ranges"] == [(10.0, 30.0)]
+
+
+def test_watchable_output_fails_when_verification_still_detects_ad_overlay(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    source_path = tmp_path / "sample.mp4"
+    source_path.write_bytes(b"video-data")
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    ended_at = started_at + timedelta(seconds=30)
+
+    def fake_render_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        keep_ranges: list[tuple[float, float]],
+    ) -> None:
+        watchable_path.write_bytes(b"watchable")
+
+    with (
+        patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
+        patch.object(
+            RecorderManager,
+            "_repair_watchable_output",
+            return_value=("watchable verification still detected commercial break overlay", 1),
+        ),
+    ):
+        watchable_path, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
+            source_path=source_path,
+            started_at=started_at,
+            ended_at=ended_at,
+            events=[],
+        )
+
+    assert watchable_path is None
+    assert watchable_state == "failed"
+    assert watchable_error == "watchable verification still detected commercial break overlay"
+    assert ad_break_count == 1
+    assert not source_path.with_name("sample.watchable.mp4").exists()
 
 
 def test_extract_timed_id3_ad_offsets_groups_consecutive_markers() -> None:
