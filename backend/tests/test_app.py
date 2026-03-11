@@ -552,7 +552,7 @@ def test_watchable_output_fails_when_verification_still_detects_ad_overlay(tmp_p
         patch.object(
             RecorderManager,
             "_repair_watchable_output",
-            return_value=("watchable verification still detected commercial break overlay", 1),
+            return_value=("watchable verification still detected Twitch playback overlay", 1),
         ),
     ):
         watchable_path, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
@@ -564,7 +564,7 @@ def test_watchable_output_fails_when_verification_still_detects_ad_overlay(tmp_p
 
     assert watchable_path is None
     assert watchable_state == "failed"
-    assert watchable_error == "watchable verification still detected commercial break overlay"
+    assert watchable_error == "watchable verification still detected Twitch playback overlay"
     assert ad_break_count == 1
     assert not source_path.with_name("sample.watchable.mp4").exists()
 
@@ -679,6 +679,17 @@ def test_repair_watchable_output_rerenders_when_ocr_finds_ad_overlay(tmp_path: P
     assert ad_break_count == 1
     assert captured["keep_ranges"] == [(0.0, 8.0), (12.0, 30.0)]
     assert watchable_path.read_bytes() == b"clean"
+
+
+def test_ocr_text_matches_twitch_overlay_detects_preparing_stream() -> None:
+    recorder = RecorderManager(Path("."), ("best",))
+
+    assert recorder._ocr_text_matches_twitch_overlay("Preparing your stream")
+    assert recorder._ocr_text_matches_twitch_overlay("Preparing your strea")
+    assert recorder._ocr_text_matches_twitch_overlay("Commercial break in progress")
+    assert recorder._ocr_text_matches_twitch_overlay("preparingyourstream")
+    assert recorder._ocr_text_matches_twitch_overlay("preparing stream")
+    assert not recorder._ocr_text_matches_twitch_overlay("live gameplay with no overlay")
 
 
 def test_stop_recording_returns_processing_before_background_finalize_completes(tmp_path: Path) -> None:

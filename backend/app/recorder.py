@@ -928,7 +928,7 @@ class RecorderManager:
                 trim_start_seconds=0.0,
             )
             if not keep_ranges:
-                return "commercial break overlay covered the entire watchable output", detected_ad_break_count
+                return "Twitch playback overlay covered the entire watchable output", detected_ad_break_count
 
             repaired_path = watchable_path.with_name(f"{watchable_path.stem}.repair{watchable_path.suffix}")
             self._render_watchable(
@@ -950,7 +950,7 @@ class RecorderManager:
         )
         if residual_windows:
             detected_ad_break_count = max(detected_ad_break_count, len(residual_windows))
-            return "watchable verification still detected commercial break overlay", detected_ad_break_count
+            return "watchable verification still detected Twitch playback overlay", detected_ad_break_count
         return None, detected_ad_break_count
 
     def _probe_media_duration(self, source_path: Path) -> float | None:
@@ -1037,7 +1037,7 @@ class RecorderManager:
                 except (IndexError, ValueError):
                     continue
                 ocr_text = self._run_tesseract(frame_path)
-                if not self._ocr_text_matches_ad_overlay(ocr_text):
+                if not self._ocr_text_matches_twitch_overlay(ocr_text):
                     continue
                 sample_time = frame_index * sample_interval_seconds
                 hit_windows.append(
@@ -1070,12 +1070,23 @@ class RecorderManager:
             return ""
         return result.stdout.lower()
 
-    def _ocr_text_matches_ad_overlay(self, text: str) -> bool:
+    def _ocr_text_matches_twitch_overlay(self, text: str) -> bool:
         normalized = " ".join(text.lower().split())
+        collapsed = normalized.replace(" ", "")
         if "commercial break in progress" in normalized:
             return True
-        return "break in progress" in normalized and any(
+        if "break in progress" in normalized and any(
             token in normalized for token in ("commercial", "ommercial", "twitch")
+        ):
+            return True
+        if any(
+            token in normalized
+            for token in ("preparing your stream", "preparing your strea", "preparing stream")
+        ):
+            return True
+        return any(
+            token in collapsed
+            for token in ("preparingyourstream", "preparingyourstrea", "preparingstream")
         )
 
     def _merge_offset_ranges(
