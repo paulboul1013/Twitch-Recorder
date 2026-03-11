@@ -61,12 +61,13 @@ class RecordingResult:
 class RecorderManager:
     STDERR_TAIL_MAX_LINES = 40
     OCR_SCAN_INTERVAL_SECONDS = 4.0
-    OCR_VERIFY_INTERVAL_SECONDS = 2.0
+    OCR_VERIFY_INTERVAL_SECONDS = 6.0
     OCR_HIT_PADDING_SECONDS = 4.0
     OCR_MERGE_GAP_SECONDS = 8.0
     TIMED_ID3_DISCONTINUITY_MIN_SECONDS = 30.0
     TIMED_ID3_DISCONTINUITY_FACTOR = 8.0
     MAX_WATCHABLE_REPAIR_PASSES = 2
+    MAX_CONCURRENT_FINALIZERS = 1
 
     def __init__(
         self,
@@ -85,6 +86,7 @@ class RecorderManager:
         self._completed_results: list[RecordingResult] = []
         self._pending_finalizers: dict[str, threading.Thread] = {}
         self._state_lock = threading.Lock()
+        self._finalize_slots = threading.Semaphore(self.MAX_CONCURRENT_FINALIZERS)
 
     def is_recording(self, channel: str) -> bool:
         with self._state_lock:
@@ -401,7 +403,7 @@ class RecorderManager:
             ad_break_count_override=processing_result.ad_break_count,
         )
         if run_inline:
-            final_result = self._finalize_recording(
+            final_result = self._run_finalization_job(
                 recording=recording,
                 ended_at=ended_at,
                 exit_code=exit_code,
@@ -415,7 +417,7 @@ class RecorderManager:
 
         def worker() -> None:
             try:
-                result = self._finalize_recording(
+                result = self._run_finalization_job(
                     recording=recording,
                     ended_at=ended_at,
                     exit_code=exit_code,
@@ -461,6 +463,27 @@ class RecorderManager:
             self._pending_finalizers[finalize_key] = thread
         thread.start()
         return processing_result
+
+    def _run_finalization_job(
+        self,
+        *,
+        recording: ActiveRecording,
+        ended_at: datetime,
+        exit_code: int,
+        state: str,
+        events_snapshot: list[RecordingEvent],
+    ) -> RecordingResult:
+        self._finalize_slots.acquire()
+        try:
+            return self._finalize_recording(
+                recording=recording,
+                ended_at=ended_at,
+                exit_code=exit_code,
+                state=state,
+                events_snapshot=events_snapshot,
+            )
+        finally:
+            self._finalize_slots.release()
 
     def _snapshot_terminal_events(
         self,
@@ -645,15 +668,60 @@ class RecorderManager:
 
         watchable_path = source_path.with_name(f"{source_path.stem}.watchable{source_path.suffix}")
         try:
+            if self._can_remux_watchable(ad_offsets=ad_offsets):
+                try:
+                    self._remux_watchable(source_path=source_path, watchable_path=watchable_path)
+                    return str(watchable_path), "ready", None, ad_break_count
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    watchable_path.unlink(missing_ok=True)
             self._render_watchable(source_path=source_path, watchable_path=watchable_path, keep_ranges=keep_ranges)
-            repair_error, repaired_ad_break_count = self._repair_watchable_output(watchable_path)
-            resolved_ad_break_count = max(ad_break_count, repaired_ad_break_count)
-            if repair_error is not None:
-                watchable_path.unlink(missing_ok=True)
-                return None, "failed", repair_error, resolved_ad_break_count
+            resolved_ad_break_count = ad_break_count
+            if ad_break_count > 0:
+                repair_error, repaired_ad_break_count = self._repair_watchable_output(watchable_path)
+                resolved_ad_break_count = max(ad_break_count, repaired_ad_break_count)
+                if repair_error is not None:
+                    watchable_path.unlink(missing_ok=True)
+                    return None, "failed", repair_error, resolved_ad_break_count
             return str(watchable_path), "ready", None, resolved_ad_break_count
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             return None, "failed", str(exc), ad_break_count
+
+    def _can_remux_watchable(self, *, ad_offsets: list[tuple[float, float]]) -> bool:
+        return not ad_offsets and self.watchable_trim_start_seconds <= 0
+
+    def _remux_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+    ) -> None:
+        watchable_path.unlink(missing_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source_path),
+            "-map",
+            "0:v?",
+            "-map",
+            "0:a?",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(watchable_path),
+        ]
+        result = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "ffmpeg remux failed")
 
     def _collect_timed_id3_ad_windows(
         self,
