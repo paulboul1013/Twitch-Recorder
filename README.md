@@ -111,7 +111,7 @@ docker compose up -d --build
 
 - `recordings/<channel>_<timestamp>.mp4`：原始錄影檔
 - `recordings/<channel>_<timestamp>.watchable.mp4`：可拖曳、可播放的後處理版本
-- `recordings/<channel>_<timestamp>.meta.json`：單次錄影的事件與輸出 metadata
+- `recordings/<channel>_<timestamp>.meta.json`：單次錄影的事件與輸出 metadata，包含 `exit_code` 與 `streamlink_stderr_tail`
 - `config/streamers.json`：監看名單
 - `config/recordings.json`：錄影歷史索引
 
@@ -120,6 +120,7 @@ docker compose up -d --build
 - 未設定使用者 token：走一般模式錄影
 - 有設定 `TWITCH_USER_OAUTH_TOKEN`：系統會先嘗試登入態抓流（best-effort），失敗時自動回退
 - 錄影中會從 `streamlink` 的輸出訊息偵測 ad break；若事件不足，結束後會再用 `timed_id3` 標記回推廣告區段
+- `.meta.json` 會保留 `streamlink` 的 process `exit_code` 與最後 40 行 stderr，方便追查 `playlist ended`、`stream disconnected`、廣告切流等退出原因
 - 錄影結束後會產生 watchable 後處理檔案，移除廣告區段，並可選擇裁掉開頭幾秒
 - 前端錄影列表目前顯示 watchable 狀態；`/recordings` API 與 `.meta.json` 仍會保留 `ad_break_count` 和 `source_mode`
 

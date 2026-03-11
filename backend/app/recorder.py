@@ -36,6 +36,7 @@ class ActiveRecording:
     started_at: datetime
     source_mode: str
     events: list[RecordingEvent] = field(default_factory=list)
+    stderr_tail: list[str] = field(default_factory=list)
     ad_break_active: bool = False
     stderr_thread: threading.Thread | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -58,6 +59,7 @@ class RecordingResult:
 
 
 class RecorderManager:
+    STDERR_TAIL_MAX_LINES = 40
     OCR_SCAN_INTERVAL_SECONDS = 4.0
     OCR_VERIFY_INTERVAL_SECONDS = 2.0
     OCR_HIT_PADDING_SECONDS = 4.0
@@ -164,6 +166,7 @@ class RecorderManager:
         self._write_metadata(
             recording=recording,
             ended_at=None,
+            exit_code=None,
             state="recording",
             clean_output_path=None,
             clean_output_state="pending",
@@ -291,6 +294,9 @@ class RecorderManager:
             if not line:
                 continue
             with recording.lock:
+                recording.stderr_tail.append(line)
+                if len(recording.stderr_tail) > self.STDERR_TAIL_MAX_LINES:
+                    del recording.stderr_tail[:-self.STDERR_TAIL_MAX_LINES]
                 event_type = self._detect_ad_transition(line, recording.ad_break_active)
             if event_type == "ad_break_started":
                 self._append_event(recording, "ad_break_started", message=line)
@@ -387,6 +393,7 @@ class RecorderManager:
         self._write_metadata(
             recording=recording,
             ended_at=ended_at,
+            exit_code=exit_code,
             state=state,
             clean_output_path=processing_result.clean_output_path,
             clean_output_state=processing_result.clean_output_state,
@@ -434,6 +441,7 @@ class RecorderManager:
                 self._write_metadata(
                     recording=recording,
                     ended_at=ended_at,
+                    exit_code=exit_code,
                     state=state,
                     clean_output_path=None,
                     clean_output_state="failed",
@@ -534,6 +542,7 @@ class RecorderManager:
         self._write_metadata(
             recording=recording,
             ended_at=ended_at,
+            exit_code=exit_code,
             state=state,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
@@ -563,6 +572,7 @@ class RecorderManager:
         *,
         recording: ActiveRecording,
         ended_at: datetime | None,
+        exit_code: int | None,
         state: str,
         clean_output_path: str | None,
         clean_output_state: str,
@@ -571,6 +581,7 @@ class RecorderManager:
     ) -> None:
         with recording.lock:
             events_payload = [event.as_dict() for event in recording.events]
+            stderr_tail = list(recording.stderr_tail)
         if ad_break_count_override is None:
             ad_break_count = sum(1 for event in events_payload if event["type"] == "ad_break_started")
         else:
@@ -581,8 +592,10 @@ class RecorderManager:
             "file_path": str(recording.file_path),
             "started_at": recording.started_at.isoformat(),
             "ended_at": ended_at.isoformat() if ended_at else None,
+            "exit_code": exit_code,
             "state": state,
             "events": events_payload,
+            "streamlink_stderr_tail": stderr_tail,
             "clean_output_path": clean_output_path,
             "clean_output_state": clean_output_state,
             "clean_output_error": clean_output_error,

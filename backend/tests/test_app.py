@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import threading
 from contextlib import contextmanager
@@ -52,6 +53,10 @@ class FakeProcess:
 
 def _status_for(payload: list[dict], name: str) -> dict:
     return next(item for item in payload if item["name"] == name)
+
+
+def _load_metadata(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @contextmanager
@@ -212,6 +217,61 @@ def test_stop_recording_updates_status_fields(tmp_path: Path) -> None:
         assert len(payload) == 1
         assert payload[0]["watchable_available"] is True
         assert payload[0]["watchable_state"] == "ready"
+
+
+def test_stop_recording_metadata_includes_streamlink_diagnostics(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    stderr_lines = [f"streamlink line {index}" for index in range(50)]
+
+    with (
+        patch("app.recorder.subprocess.Popen", return_value=FakeProcess(stderr_lines=stderr_lines)),
+        patch.object(
+            RecorderManager,
+            "_build_watchable_output",
+            side_effect=lambda self, **kwargs: (str(kwargs["source_path"]), "ready", None, 0),
+            autospec=True,
+        ),
+    ):
+        output_path = Path(recorder.start_recording("alpha"))
+        output_path.write_bytes(b"video-data")
+        result = recorder.stop_recording("alpha", wait_for_finalize=True)
+
+    assert result is not None
+    metadata = _load_metadata(output_path.with_suffix(".meta.json"))
+    assert metadata["state"] == "stopped"
+    assert metadata["exit_code"] == -15
+    assert metadata["streamlink_stderr_tail"] == stderr_lines[-recorder.STDERR_TAIL_MAX_LINES :]
+
+
+def test_completed_recording_metadata_includes_streamlink_diagnostics(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    stderr_lines = [
+        "[cli][info] Opening stream: best",
+        "[download][warning] Playlist ended unexpectedly",
+        "[stream][info] Stream disconnected",
+    ]
+    process = FakeProcess(stderr_lines=stderr_lines)
+
+    with (
+        patch("app.recorder.subprocess.Popen", return_value=process),
+        patch.object(
+            RecorderManager,
+            "_build_watchable_output",
+            side_effect=lambda self, **kwargs: (str(kwargs["source_path"]), "ready", None, 0),
+            autospec=True,
+        ),
+    ):
+        output_path = Path(recorder.start_recording("alpha"))
+        output_path.write_bytes(b"video-data")
+        process.returncode = 0
+        recorder.poll()
+        recorder.wait_for_pending_finalizations()
+        recorder.poll()
+
+    metadata = _load_metadata(output_path.with_suffix(".meta.json"))
+    assert metadata["state"] == "completed"
+    assert metadata["exit_code"] == 0
+    assert metadata["streamlink_stderr_tail"] == stderr_lines
 
 
 def test_start_recording_returns_not_started_when_offline(tmp_path: Path) -> None:
