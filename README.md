@@ -62,7 +62,7 @@ TWITCH_USER_LOGIN=
 MAX_CONCURRENT_STREAMERS=3
 POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
-RECORDING_START_DELAY_SECONDS=15
+RECORDING_START_DELAY_SECONDS=25
 WATCHABLE_TRIM_START_SECONDS=0
 RECORDINGS_PATH=/recordings
 CONFIG_PATH=/config
@@ -73,8 +73,8 @@ ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 
 - `TWITCH_USER_OAUTH_TOKEN`：使用者 OAuth Token，用於「登入態錄影」以最佳努力降低廣告與開場等待畫面
 - `TWITCH_USER_LOGIN`：可選，通常填 Twitch 帳號 login；未填時系統會以 token 情境盡力處理
-- `RECORDING_START_DELAY_SECONDS`：主播開播後延遲幾秒才啟動錄影（預設 15 秒），用來避開開場 `Preparing your stream` 畫面
-- `WATCHABLE_TRIM_START_SECONDS`：watchable 檔案固定裁掉開頭秒數（預設 0 秒）；若開場常出現 `Preparing your stream`，可設 `10~20`
+- `RECORDING_START_DELAY_SECONDS`：主播開播後延遲幾秒才啟動錄影（預設 25 秒），用來避開開場 `Preparing your stream` 畫面，這是主方案
+- `WATCHABLE_TRIM_START_SECONDS`：watchable 檔案固定裁掉開頭秒數（預設 0 秒）；當主方案仍有殘留時再作為 fallback 調整（常見可設 `10~20`）
 
 2. 啟動專案
 
@@ -119,9 +119,9 @@ docker compose up -d --build
 
 - 未設定使用者 token：走一般模式錄影
 - 有設定 `TWITCH_USER_OAUTH_TOKEN`：系統會先嘗試登入態抓流（best-effort），失敗時自動回退
-- 錄影中會從 `streamlink` 的輸出訊息偵測 ad break；若事件不足，結束後會再用 `timed_id3` 標記回推廣告區段
+- 錄影中會從 `streamlink` 的輸出訊息偵測 ad break；`timed_id3` 只作候選訊號，需局部 OCR 確認後才會採信
 - `.meta.json` 會保留 `streamlink` 的 process `exit_code` 與最後 40 行 stderr，方便追查 `playlist ended`、`stream disconnected`、廣告切流等退出原因
-- 錄影結束後會產生 watchable 後處理檔案，移除廣告區段，並可選擇裁掉開頭幾秒
+- 錄影結束後會產生 watchable 後處理檔案：無廣告時優先走 remux / trim-copy 快路徑；只有高信心廣告區段才進入切段轉檔
 - 前端錄影列表目前顯示 watchable 狀態；`/recordings` API 與 `.meta.json` 仍會保留 `ad_break_count` 和 `source_mode`
 
 ## 常用指令
@@ -161,4 +161,4 @@ docker compose down
 
 - 原始錄影檔由 `streamlink` 直接寫出，某些播放器可能把它當成不易拖曳的串流格式；平常播放優先使用 `.watchable.mp4`
 - watchable 版本是在錄影結束後才產生；如果錄影太短，或後處理失敗，原始檔仍會保留，但 watchable 狀態可能顯示失敗
-- 若開場仍常錄到 `Preparing your stream`，先調高 `RECORDING_START_DELAY_SECONDS`；若只想讓可播放版本略過開頭，再調整 `WATCHABLE_TRIM_START_SECONDS`
+- 若開場仍常錄到 `Preparing your stream`，優先調高 `RECORDING_START_DELAY_SECONDS`（主方案）；若只想讓可播放版本略過開頭，再調整 `WATCHABLE_TRIM_START_SECONDS`（fallback）
