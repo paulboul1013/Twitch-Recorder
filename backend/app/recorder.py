@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass(slots=True)
@@ -59,16 +60,26 @@ class RecordingResult:
     ad_break_count: int
 
 
+@dataclass(slots=True)
+class WatchableMetadataContext:
+    watchable_strategy: str | None = None
+    ad_detection_sources: list[str] = field(default_factory=list)
+    prepare_mitigation: list[str] = field(default_factory=list)
+
+
 class RecorderManager:
     STDERR_TAIL_MAX_LINES = 40
     OCR_SCAN_INTERVAL_SECONDS = 4.0
     OCR_VERIFY_INTERVAL_SECONDS = 6.0
     OCR_HIT_PADDING_SECONDS = 4.0
     OCR_MERGE_GAP_SECONDS = 8.0
+    OCR_LOCAL_VALIDATION_PADDING_SECONDS = 10.0
     TIMED_ID3_DISCONTINUITY_MIN_SECONDS = 30.0
     TIMED_ID3_DISCONTINUITY_FACTOR = 8.0
     MAX_WATCHABLE_REPAIR_PASSES = 2
     MAX_CONCURRENT_FINALIZERS = 1
+    TRIM_PREPARE_VERIFY_SECONDS = 30.0
+    SEGMENT_VERIFY_NEIGHBOR_SECONDS = 10.0
 
     def __init__(
         self,
@@ -77,17 +88,20 @@ class RecorderManager:
         twitch_user_oauth_token: str = "",
         twitch_user_login: str = "",
         watchable_trim_start_seconds: int = 0,
+        recording_start_delay_seconds: int = 0,
     ) -> None:
         self.recordings_path = recordings_path
         self.preferred_qualities = preferred_qualities
         self.twitch_user_oauth_token = twitch_user_oauth_token
         self.twitch_user_login = twitch_user_login
         self.watchable_trim_start_seconds = max(0, int(watchable_trim_start_seconds))
+        self.recording_start_delay_seconds = max(0, int(recording_start_delay_seconds))
         self._active: dict[str, ActiveRecording] = {}
         self._completed_results: list[RecordingResult] = []
         self._pending_finalizers: dict[str, threading.Thread] = {}
         self._state_lock = threading.Lock()
         self._finalize_slots = threading.Semaphore(self.MAX_CONCURRENT_FINALIZERS)
+        self._last_watchable_context = WatchableMetadataContext()
 
     def is_recording(self, channel: str) -> bool:
         with self._state_lock:
@@ -571,6 +585,7 @@ class RecorderManager:
             ended_at=ended_at,
             events=events_snapshot,
         )
+        watchable_context = self._consume_last_watchable_context()
         watchable_processing_seconds = round(max(0.0, time.perf_counter() - processing_started_at), 3)
         self._write_metadata(
             recording=recording,
@@ -582,6 +597,9 @@ class RecorderManager:
             clean_output_error=clean_output_error,
             watchable_processing_seconds=watchable_processing_seconds,
             ad_break_count_override=resolved_ad_break_count,
+            watchable_strategy=watchable_context.watchable_strategy,
+            ad_detection_sources=watchable_context.ad_detection_sources,
+            prepare_mitigation=watchable_context.prepare_mitigation,
         )
         return RecordingResult(
             channel=recording.channel,
@@ -601,6 +619,34 @@ class RecorderManager:
     def _count_ad_breaks(self, events: list[RecordingEvent]) -> int:
         return sum(1 for event in events if event.type == "ad_break_started")
 
+    def _base_prepare_mitigation(self) -> list[str]:
+        if self.recording_start_delay_seconds > 0:
+            return ["start_delay"]
+        return []
+
+    def _infer_ad_detection_sources_from_events(self, events: list[RecordingEvent]) -> list[str]:
+        if any(event.type == "ad_break_started" for event in events):
+            return ["stderr"]
+        return []
+
+    def _set_last_watchable_context(
+        self,
+        *,
+        watchable_strategy: str | None,
+        ad_detection_sources: list[str],
+        prepare_mitigation: list[str],
+    ) -> None:
+        self._last_watchable_context = WatchableMetadataContext(
+            watchable_strategy=watchable_strategy,
+            ad_detection_sources=list(dict.fromkeys(ad_detection_sources)),
+            prepare_mitigation=list(dict.fromkeys(prepare_mitigation)),
+        )
+
+    def _consume_last_watchable_context(self) -> WatchableMetadataContext:
+        context = self._last_watchable_context
+        self._last_watchable_context = WatchableMetadataContext()
+        return context
+
     def _write_metadata(
         self,
         *,
@@ -613,6 +659,9 @@ class RecorderManager:
         clean_output_error: str | None,
         watchable_processing_seconds: float | None,
         ad_break_count_override: int | None = None,
+        watchable_strategy: str | None = None,
+        ad_detection_sources: list[str] | None = None,
+        prepare_mitigation: list[str] | None = None,
     ) -> None:
         with recording.lock:
             events_payload = [event.as_dict() for event in recording.events]
@@ -621,6 +670,10 @@ class RecorderManager:
             ad_break_count = sum(1 for event in events_payload if event["type"] == "ad_break_started")
         else:
             ad_break_count = max(0, int(ad_break_count_override))
+        if ad_detection_sources is None:
+            ad_detection_sources = self._infer_ad_detection_sources_from_events(recording.events)
+        if prepare_mitigation is None:
+            prepare_mitigation = self._base_prepare_mitigation()
 
         payload = {
             "channel": recording.channel,
@@ -637,6 +690,9 @@ class RecorderManager:
             "watchable_processing_seconds": watchable_processing_seconds,
             "source_mode": recording.source_mode,
             "ad_break_count": ad_break_count,
+            "watchable_strategy": watchable_strategy,
+            "ad_detection_sources": list(dict.fromkeys(ad_detection_sources)),
+            "prepare_mitigation": list(dict.fromkeys(prepare_mitigation)),
         }
         recording.metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -648,59 +704,364 @@ class RecorderManager:
         ended_at: datetime,
         events: list[RecordingEvent],
     ) -> tuple[str | None, str, str | None, int]:
+        base_prepare_mitigation = self._base_prepare_mitigation()
+        ad_detection_sources = self._infer_ad_detection_sources_from_events(events)
+        self._set_last_watchable_context(
+            watchable_strategy=None,
+            ad_detection_sources=ad_detection_sources,
+            prepare_mitigation=base_prepare_mitigation,
+        )
         if not source_path.exists():
             return None, "failed", "source recording file does not exist", 0
 
         duration_seconds = max(0.0, (ended_at - started_at).total_seconds())
-        ad_windows = self._collect_ad_windows(events, ended_at=ended_at)
-        ad_windows.extend(
-            self._collect_timed_id3_ad_windows(
-                source_path=source_path,
-                started_at=started_at,
-                duration_seconds=duration_seconds,
-            )
-        )
-        ad_offsets = self._merge_offset_ranges(
+        if duration_seconds <= 0:
+            return None, "failed", "recording duration too short to produce watchable output", 0
+
+        trim_start_seconds = float(self.watchable_trim_start_seconds)
+        watchable_path = source_path.with_name(f"{source_path.stem}.watchable{source_path.suffix}")
+
+        stderr_windows = self._collect_ad_windows(events, ended_at=ended_at)
+        stderr_offsets = self._merge_offset_ranges(
             [
                 (
                     max(0.0, (ad_start - started_at).total_seconds()),
                     min(duration_seconds, (ad_end - started_at).total_seconds()),
                 )
-                for ad_start, ad_end in ad_windows
+                for ad_start, ad_end in stderr_windows
                 if ad_end > ad_start
             ]
         )
-        ad_break_count = len(ad_offsets)
-        keep_ranges = self._build_keep_ranges_from_offsets(
-            duration_seconds,
-            ad_offsets,
-            trim_start_seconds=float(self.watchable_trim_start_seconds),
-        )
-        if not keep_ranges:
-            return None, "failed", "recording duration too short to produce watchable output", ad_break_count
 
-        watchable_path = source_path.with_name(f"{source_path.stem}.watchable{source_path.suffix}")
+        timed_id3_offsets = self._confirm_timed_id3_ad_offsets_with_ocr(
+            source_path=source_path,
+            duration_seconds=duration_seconds,
+        )
+        if timed_id3_offsets:
+            ad_detection_sources.append("timed_id3_confirmed_by_ocr")
+
+        ad_offsets = self._merge_offset_ranges(stderr_offsets + timed_id3_offsets)
+        ad_break_count = len(ad_offsets)
+
         try:
             if self._can_remux_watchable(ad_offsets=ad_offsets):
                 try:
                     self._remux_watchable(source_path=source_path, watchable_path=watchable_path)
+                    self._set_last_watchable_context(
+                        watchable_strategy="remux",
+                        ad_detection_sources=ad_detection_sources,
+                        prepare_mitigation=base_prepare_mitigation,
+                    )
                     return str(watchable_path), "ready", None, ad_break_count
                 except (OSError, RuntimeError, subprocess.SubprocessError):
                     watchable_path.unlink(missing_ok=True)
-            self._render_watchable(source_path=source_path, watchable_path=watchable_path, keep_ranges=keep_ranges)
-            resolved_ad_break_count = ad_break_count
-            if ad_break_count > 0:
-                repair_error, repaired_ad_break_count = self._repair_watchable_output(watchable_path)
-                resolved_ad_break_count = max(ad_break_count, repaired_ad_break_count)
-                if repair_error is not None:
+                    fallback_ranges = self._build_keep_ranges_from_offsets(
+                        duration_seconds,
+                        [],
+                        trim_start_seconds=0.0,
+                    )
+                    if not fallback_ranges:
+                        return (
+                            None,
+                            "failed",
+                            "recording duration too short to produce watchable output",
+                            ad_break_count,
+                        )
+                    self._render_watchable(
+                        source_path=source_path,
+                        watchable_path=watchable_path,
+                        keep_ranges=fallback_ranges,
+                    )
+                    self._set_last_watchable_context(
+                        watchable_strategy="fallback_reencode",
+                        ad_detection_sources=ad_detection_sources,
+                        prepare_mitigation=base_prepare_mitigation + ["reencode_fallback"],
+                    )
+                    return str(watchable_path), "ready", None, ad_break_count
+
+            if ad_break_count == 0 and trim_start_seconds > 0:
+                self._trim_copy_watchable(
+                    source_path=source_path,
+                    watchable_path=watchable_path,
+                    trim_start_seconds=trim_start_seconds,
+                )
+                if self._has_prepare_overlay_in_prefix(
+                    watchable_path,
+                    verify_seconds=self.TRIM_PREPARE_VERIFY_SECONDS,
+                ):
+                    fallback_ranges = self._build_keep_ranges_from_offsets(
+                        duration_seconds,
+                        [],
+                        trim_start_seconds=trim_start_seconds,
+                    )
+                    if not fallback_ranges:
+                        return (
+                            None,
+                            "failed",
+                            "recording duration too short to produce watchable output",
+                            ad_break_count,
+                        )
+                    self._render_watchable(
+                        source_path=source_path,
+                        watchable_path=watchable_path,
+                        keep_ranges=fallback_ranges,
+                    )
+                    self._set_last_watchable_context(
+                        watchable_strategy="fallback_reencode",
+                        ad_detection_sources=ad_detection_sources,
+                        prepare_mitigation=base_prepare_mitigation
+                        + ["trim_copy_fallback", "reencode_fallback"],
+                    )
+                    return str(watchable_path), "ready", None, ad_break_count
+
+                self._set_last_watchable_context(
+                    watchable_strategy="trim_copy",
+                    ad_detection_sources=ad_detection_sources,
+                    prepare_mitigation=base_prepare_mitigation + ["trim_copy_fallback"],
+                )
+                return str(watchable_path), "ready", None, ad_break_count
+
+            keep_ranges = self._build_keep_ranges_from_offsets(
+                duration_seconds,
+                ad_offsets,
+                trim_start_seconds=trim_start_seconds,
+            )
+            if not keep_ranges:
+                return None, "failed", "recording duration too short to produce watchable output", ad_break_count
+
+            self._render_watchable(
+                source_path=source_path,
+                watchable_path=watchable_path,
+                keep_ranges=keep_ranges,
+            )
+
+            verification_ranges = self._build_segment_verification_ranges(keep_ranges)
+            if verification_ranges and self._contains_overlay_in_ranges(
+                watchable_path,
+                sample_ranges=verification_ranges,
+            ):
+                self._reencode_existing_watchable_output(watchable_path)
+                if self._contains_overlay_in_ranges(
+                    watchable_path,
+                    sample_ranges=verification_ranges,
+                ):
                     watchable_path.unlink(missing_ok=True)
-                    return None, "failed", repair_error, resolved_ad_break_count
-            return str(watchable_path), "ready", None, resolved_ad_break_count
+                    self._set_last_watchable_context(
+                        watchable_strategy="fallback_reencode",
+                        ad_detection_sources=ad_detection_sources,
+                        prepare_mitigation=base_prepare_mitigation + ["reencode_fallback"],
+                    )
+                    return (
+                        None,
+                        "failed",
+                        "watchable verification still detected Twitch playback overlay",
+                        ad_break_count,
+                    )
+                self._set_last_watchable_context(
+                    watchable_strategy="fallback_reencode",
+                    ad_detection_sources=ad_detection_sources,
+                    prepare_mitigation=base_prepare_mitigation + ["reencode_fallback"],
+                )
+                return str(watchable_path), "ready", None, ad_break_count
+
+            self._set_last_watchable_context(
+                watchable_strategy="segment_transcode",
+                ad_detection_sources=ad_detection_sources,
+                prepare_mitigation=base_prepare_mitigation,
+            )
+            return str(watchable_path), "ready", None, ad_break_count
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             return None, "failed", str(exc), ad_break_count
 
     def _can_remux_watchable(self, *, ad_offsets: list[tuple[float, float]]) -> bool:
         return not ad_offsets and self.watchable_trim_start_seconds <= 0
+
+    def _trim_copy_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        trim_start_seconds: float,
+    ) -> None:
+        watchable_path.unlink(missing_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{max(0.0, trim_start_seconds):.3f}",
+            "-i",
+            str(source_path),
+            "-map",
+            "0:v?",
+            "-map",
+            "0:a?",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(watchable_path),
+        ]
+        result = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "ffmpeg trim-copy failed")
+
+    def _confirm_timed_id3_ad_offsets_with_ocr(
+        self,
+        *,
+        source_path: Path,
+        duration_seconds: float,
+    ) -> list[tuple[float, float]]:
+        candidate_offsets = self._extract_timed_id3_ad_offsets(
+            source_path,
+            expected_duration_seconds=duration_seconds,
+        )
+        if not candidate_offsets or duration_seconds <= 0:
+            return []
+
+        expanded_ranges = self._merge_offset_ranges(
+            [
+                (
+                    max(0.0, start - self.OCR_LOCAL_VALIDATION_PADDING_SECONDS),
+                    min(duration_seconds, end + self.OCR_LOCAL_VALIDATION_PADDING_SECONDS),
+                )
+                for start, end in candidate_offsets
+                if end > start
+            ]
+        )
+        if not expanded_ranges:
+            return []
+
+        ocr_hits = self._collect_ocr_ad_windows(
+            source_path,
+            duration_seconds=duration_seconds,
+            sample_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
+            sample_ranges=expanded_ranges,
+            matcher=self._ocr_text_matches_ad_overlay,
+        )
+        if not ocr_hits:
+            return []
+
+        confirmed: list[tuple[float, float]] = []
+        for start, end in candidate_offsets:
+            expanded_start = max(0.0, start - self.OCR_LOCAL_VALIDATION_PADDING_SECONDS)
+            expanded_end = min(duration_seconds, end + self.OCR_LOCAL_VALIDATION_PADDING_SECONDS)
+            if any(
+                self._ranges_intersect((expanded_start, expanded_end), ocr_range)
+                for ocr_range in ocr_hits
+            ):
+                confirmed.append((start, end))
+
+        return self._merge_offset_ranges(confirmed)
+
+    def _has_prepare_overlay_in_prefix(
+        self,
+        source_path: Path,
+        *,
+        verify_seconds: float,
+    ) -> bool:
+        duration_seconds = self._probe_media_duration(source_path)
+        if duration_seconds is None or duration_seconds <= 0:
+            return True
+        inspect_window = min(duration_seconds, max(0.0, verify_seconds))
+        if inspect_window <= 0:
+            return False
+        overlay_windows = self._collect_ocr_ad_windows(
+            source_path,
+            duration_seconds=duration_seconds,
+            sample_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
+            sample_ranges=[(0.0, inspect_window)],
+            matcher=self._ocr_text_matches_prepare_overlay,
+        )
+        return bool(overlay_windows)
+
+    def _contains_overlay_in_ranges(
+        self,
+        source_path: Path,
+        *,
+        sample_ranges: list[tuple[float, float]],
+    ) -> bool:
+        duration_seconds = self._probe_media_duration(source_path)
+        if duration_seconds is None or duration_seconds <= 0:
+            return True
+        overlay_windows = self._collect_ocr_ad_windows(
+            source_path,
+            duration_seconds=duration_seconds,
+            sample_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
+            sample_ranges=sample_ranges,
+            matcher=self._ocr_text_matches_twitch_overlay,
+        )
+        return bool(overlay_windows)
+
+    def _build_segment_verification_ranges(
+        self,
+        keep_ranges: list[tuple[float, float]],
+    ) -> list[tuple[float, float]]:
+        if not keep_ranges:
+            return []
+
+        total_duration = sum(max(0.0, end - start) for start, end in keep_ranges)
+        if total_duration <= 0:
+            return []
+
+        boundary_ranges: list[tuple[float, float]] = []
+        cursor = 0.0
+        for start, end in keep_ranges[:-1]:
+            cursor += max(0.0, end - start)
+            boundary_ranges.append(
+                (
+                    max(0.0, cursor - self.SEGMENT_VERIFY_NEIGHBOR_SECONDS),
+                    min(total_duration, cursor + self.SEGMENT_VERIFY_NEIGHBOR_SECONDS),
+                )
+            )
+
+        # Always include output head/tail neighborhoods to catch boundary leakage.
+        boundary_ranges.append((0.0, min(total_duration, self.SEGMENT_VERIFY_NEIGHBOR_SECONDS)))
+        boundary_ranges.append(
+            (
+                max(0.0, total_duration - self.SEGMENT_VERIFY_NEIGHBOR_SECONDS),
+                total_duration,
+            )
+        )
+        return self._merge_offset_ranges(boundary_ranges)
+
+    def _reencode_existing_watchable_output(self, watchable_path: Path) -> None:
+        duration_seconds = self._probe_media_duration(watchable_path)
+        if duration_seconds is None:
+            raise RuntimeError("failed to probe watchable output duration")
+
+        keep_ranges = self._build_keep_ranges_from_offsets(
+            duration_seconds,
+            [],
+            trim_start_seconds=0.0,
+        )
+        if not keep_ranges:
+            raise RuntimeError("watchable output duration too short to re-encode")
+
+        fallback_path = watchable_path.with_name(f"{watchable_path.stem}.fallback{watchable_path.suffix}")
+        fallback_path.unlink(missing_ok=True)
+        self._render_watchable(
+            source_path=watchable_path,
+            watchable_path=fallback_path,
+            keep_ranges=keep_ranges,
+        )
+        fallback_path.replace(watchable_path)
+
+    def _ranges_intersect(
+        self,
+        left: tuple[float, float],
+        right: tuple[float, float],
+    ) -> bool:
+        left_start, left_end = left
+        right_start, right_end = right
+        return min(left_end, right_end) > max(left_start, right_start)
 
     def _remux_watchable(
         self,
@@ -1084,11 +1445,25 @@ class RecorderManager:
         *,
         duration_seconds: float,
         sample_interval_seconds: float,
+        sample_ranges: list[tuple[float, float]] | None = None,
+        matcher: Callable[[str], bool] | None = None,
     ) -> list[tuple[float, float]]:
         if duration_seconds <= 0 or sample_interval_seconds <= 0:
             return []
+        if matcher is None:
+            matcher = self._ocr_text_matches_twitch_overlay
 
-        frame_pattern = "frame_%06d.png"
+        scan_ranges = sample_ranges or [(0.0, duration_seconds)]
+        merged_scan_ranges = self._merge_offset_ranges(
+            [
+                (max(0.0, start), min(duration_seconds, end))
+                for start, end in scan_ranges
+                if end > start
+            ]
+        )
+        if not merged_scan_ranges:
+            return []
+
         filter_chain = (
             "fps=1/"
             f"{sample_interval_seconds},"
@@ -1098,48 +1473,56 @@ class RecorderManager:
         )
         with tempfile.TemporaryDirectory(prefix="ocrscan_") as temp_dir:
             temp_root = Path(temp_dir)
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(source_path),
-                "-vf",
-                filter_chain,
-                "-start_number",
-                "0",
-                str(temp_root / frame_pattern),
-            ]
-            try:
-                result = subprocess.run(
-                    cmd,
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
-            except (OSError, subprocess.SubprocessError):
-                return []
-            if result.returncode != 0:
-                return []
-
             hit_windows: list[tuple[float, float]] = []
-            for frame_path in sorted(temp_root.glob("frame_*.png")):
+            for range_index, (range_start, range_end) in enumerate(merged_scan_ranges):
+                if range_end <= range_start:
+                    continue
+                frame_pattern = f"range_{range_index:03d}_frame_%06d.png"
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    f"{range_start:.3f}",
+                    "-to",
+                    f"{range_end:.3f}",
+                    "-i",
+                    str(source_path),
+                    "-vf",
+                    filter_chain,
+                    "-start_number",
+                    "0",
+                    str(temp_root / frame_pattern),
+                ]
                 try:
-                    frame_index = int(frame_path.stem.rsplit("_", 1)[1])
-                except (IndexError, ValueError):
-                    continue
-                ocr_text = self._run_tesseract(frame_path)
-                if not self._ocr_text_matches_twitch_overlay(ocr_text):
-                    continue
-                sample_time = frame_index * sample_interval_seconds
-                hit_windows.append(
-                    (
-                        max(0.0, sample_time - self.OCR_HIT_PADDING_SECONDS),
-                        min(duration_seconds, sample_time + self.OCR_HIT_PADDING_SECONDS),
+                    result = subprocess.run(
+                        cmd,
+                        text=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
                     )
-                )
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                if result.returncode != 0:
+                    continue
+
+                for frame_path in sorted(temp_root.glob(f"range_{range_index:03d}_frame_*.png")):
+                    try:
+                        frame_index = int(frame_path.stem.rsplit("_", 1)[1])
+                    except (IndexError, ValueError):
+                        continue
+                    ocr_text = self._run_tesseract(frame_path)
+                    if not matcher(ocr_text):
+                        continue
+                    sample_time = range_start + (frame_index * sample_interval_seconds)
+                    hit_windows.append(
+                        (
+                            max(0.0, sample_time - self.OCR_HIT_PADDING_SECONDS),
+                            min(duration_seconds, sample_time + self.OCR_HIT_PADDING_SECONDS),
+                        )
+                    )
 
         return self._merge_offset_ranges(hit_windows, merge_gap_seconds=self.OCR_MERGE_GAP_SECONDS)
 
@@ -1164,15 +1547,26 @@ class RecorderManager:
             return ""
         return result.stdout.lower()
 
-    def _ocr_text_matches_twitch_overlay(self, text: str) -> bool:
+    def _ocr_text_matches_ad_overlay(self, text: str) -> bool:
         normalized = " ".join(text.lower().split())
-        collapsed = normalized.replace(" ", "")
         if "commercial break in progress" in normalized:
             return True
         if "break in progress" in normalized and any(
             token in normalized for token in ("commercial", "ommercial", "twitch")
         ):
             return True
+        return any(
+            token in normalized
+            for token in (
+                "ad break started",
+                "commercial break",
+                "ads in progress",
+            )
+        )
+
+    def _ocr_text_matches_prepare_overlay(self, text: str) -> bool:
+        normalized = " ".join(text.lower().split())
+        collapsed = normalized.replace(" ", "")
         if any(
             token in normalized
             for token in ("preparing your stream", "preparing your strea", "preparing stream")
@@ -1182,6 +1576,9 @@ class RecorderManager:
             token in collapsed
             for token in ("preparingyourstream", "preparingyourstrea", "preparingstream")
         )
+
+    def _ocr_text_matches_twitch_overlay(self, text: str) -> bool:
+        return self._ocr_text_matches_ad_overlay(text) or self._ocr_text_matches_prepare_overlay(text)
 
     def _merge_offset_ranges(
         self,

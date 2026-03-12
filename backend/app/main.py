@@ -33,6 +33,7 @@ def build_service(settings: Settings | None = None) -> MonitorService:
         twitch_user_oauth_token=settings.twitch_user_oauth_token,
         twitch_user_login=settings.twitch_user_login,
         watchable_trim_start_seconds=settings.watchable_trim_start_seconds,
+        recording_start_delay_seconds=settings.recording_start_delay_seconds,
     )
     return MonitorService(
         settings=settings,
