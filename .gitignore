@@ -4,6 +4,7 @@
 
 *.md
 !README.md
+!README_EN.md
 
 __pycache__/
 *.py[cod]
