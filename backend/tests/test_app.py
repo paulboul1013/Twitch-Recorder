@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from app.models import StreamStatus
-from app.recorder import RecorderManager
+from app.recorder import RecorderManager, RecordingEvent
 from app.service import MonitorService
 from app.store import RecordingHistoryStore, StreamerStore, TrackedRecording
 from app.twitch import TwitchClient
@@ -243,6 +243,9 @@ def test_stop_recording_metadata_includes_streamlink_diagnostics(tmp_path: Path)
     assert metadata["exit_code"] == -15
     assert metadata["streamlink_stderr_tail"] == stderr_lines[-recorder.STDERR_TAIL_MAX_LINES :]
     assert metadata["watchable_processing_seconds"] == 1.25
+    assert metadata["watchable_strategy"] is None
+    assert metadata["ad_detection_sources"] == []
+    assert metadata["prepare_mitigation"] == []
 
 
 def test_completed_recording_metadata_includes_streamlink_diagnostics(tmp_path: Path) -> None:
@@ -276,6 +279,95 @@ def test_completed_recording_metadata_includes_streamlink_diagnostics(tmp_path: 
     assert metadata["exit_code"] == 0
     assert metadata["streamlink_stderr_tail"] == stderr_lines
     assert metadata["watchable_processing_seconds"] == 2.5
+    assert metadata["watchable_strategy"] is None
+    assert metadata["ad_detection_sources"] == []
+    assert metadata["prepare_mitigation"] == []
+
+
+def test_metadata_pending_state_has_new_watchable_fields(tmp_path: Path) -> None:
+    recorder = RecorderManager(
+        tmp_path,
+        ("best",),
+        recording_start_delay_seconds=25,
+    )
+
+    with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()):
+        output_path = Path(recorder.start_recording("alpha"))
+
+    metadata = _load_metadata(output_path.with_suffix(".meta.json"))
+    assert metadata["state"] == "recording"
+    assert metadata["clean_output_state"] == "pending"
+    assert metadata["watchable_processing_seconds"] is None
+    assert metadata["watchable_strategy"] is None
+    assert metadata["ad_detection_sources"] == []
+    assert metadata["prepare_mitigation"] == ["start_delay"]
+
+
+def test_metadata_ready_state_includes_strategy_and_detection_sources(tmp_path: Path) -> None:
+    recorder = RecorderManager(
+        tmp_path,
+        ("best",),
+        recording_start_delay_seconds=25,
+    )
+
+    def fake_remux_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+    ) -> None:
+        watchable_path.write_bytes(b"watchable")
+
+    with (
+        patch("app.recorder.subprocess.Popen", return_value=FakeProcess()),
+        patch.object(RecorderManager, "_confirm_timed_id3_ad_offsets_with_ocr", return_value=[]),
+        patch.object(RecorderManager, "_remux_watchable", autospec=True, side_effect=fake_remux_watchable),
+    ):
+        output_path = Path(recorder.start_recording("alpha"))
+        output_path.write_bytes(b"video-data")
+        recorder.stop_recording("alpha", wait_for_finalize=True)
+
+    metadata = _load_metadata(output_path.with_suffix(".meta.json"))
+    assert metadata["clean_output_state"] == "ready"
+    assert metadata["watchable_strategy"] == "remux"
+    assert metadata["ad_detection_sources"] == []
+    assert metadata["prepare_mitigation"] == ["start_delay"]
+
+
+def test_metadata_failed_state_includes_strategy_and_sources(tmp_path: Path) -> None:
+    recorder = RecorderManager(
+        tmp_path,
+        ("best",),
+        recording_start_delay_seconds=25,
+    )
+
+    def fake_build_watchable_output(self, **kwargs):
+        self._set_last_watchable_context(
+            watchable_strategy="fallback_reencode",
+            ad_detection_sources=["stderr"],
+            prepare_mitigation=["start_delay", "reencode_fallback"],
+        )
+        return (None, "failed", "forced failure", 1)
+
+    with (
+        patch("app.recorder.subprocess.Popen", return_value=FakeProcess(stderr_lines=["ad break started"])),
+        patch.object(
+            RecorderManager,
+            "_build_watchable_output",
+            autospec=True,
+            side_effect=fake_build_watchable_output,
+        ),
+    ):
+        output_path = Path(recorder.start_recording("alpha"))
+        output_path.write_bytes(b"video-data")
+        recorder.stop_recording("alpha", wait_for_finalize=True)
+
+    metadata = _load_metadata(output_path.with_suffix(".meta.json"))
+    assert metadata["clean_output_state"] == "failed"
+    assert metadata["clean_output_error"] == "forced failure"
+    assert metadata["watchable_strategy"] == "fallback_reencode"
+    assert metadata["ad_detection_sources"] == ["stderr"]
+    assert metadata["prepare_mitigation"] == ["start_delay", "reencode_fallback"]
 
 
 def test_start_recording_returns_not_started_when_offline(tmp_path: Path) -> None:
@@ -513,7 +605,7 @@ def test_watchable_output_is_remuxed_even_without_ad_windows(tmp_path: Path) -> 
             side_effect=fake_remux_watchable,
         ) as remux_mock,
         patch.object(RecorderManager, "_render_watchable") as render_mock,
-        patch.object(RecorderManager, "_repair_watchable_output") as repair_mock,
+        patch.object(RecorderManager, "_collect_ocr_ad_windows") as ocr_mock,
     ):
         watchable_path, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
             source_path=source_path,
@@ -529,16 +621,70 @@ def test_watchable_output_is_remuxed_even_without_ad_windows(tmp_path: Path) -> 
     assert watchable_path.endswith(".watchable.mp4")
     remux_mock.assert_called_once()
     render_mock.assert_not_called()
-    repair_mock.assert_not_called()
+    ocr_mock.assert_not_called()
 
 
-def test_watchable_output_applies_trim_start_seconds(tmp_path: Path) -> None:
+def test_watchable_output_uses_trim_copy_fast_path_when_trim_enabled(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",), watchable_trim_start_seconds=12)
+    source_path = tmp_path / "sample.mp4"
+    source_path.write_bytes(b"video-data")
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    ended_at = started_at + timedelta(seconds=30)
+
+    def fake_trim_copy_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        trim_start_seconds: float,
+    ) -> None:
+        assert trim_start_seconds == 12
+        watchable_path.write_bytes(b"watchable")
+
+    with (
+        patch.object(
+            RecorderManager,
+            "_trim_copy_watchable",
+            autospec=True,
+            side_effect=fake_trim_copy_watchable,
+        ) as trim_copy_mock,
+        patch.object(RecorderManager, "_has_prepare_overlay_in_prefix", return_value=False) as verify_mock,
+        patch.object(RecorderManager, "_render_watchable") as render_mock,
+    ):
+        _, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
+            source_path=source_path,
+            started_at=started_at,
+            ended_at=ended_at,
+            events=[],
+        )
+
+    assert watchable_state == "ready"
+    assert watchable_error is None
+    assert ad_break_count == 0
+    trim_copy_mock.assert_called_once()
+    verify_mock.assert_called_once()
+    render_mock.assert_not_called()
+    watchable_context = recorder._consume_last_watchable_context()
+    assert watchable_context.watchable_strategy == "trim_copy"
+    assert "trim_copy_fallback" in watchable_context.prepare_mitigation
+
+
+def test_trim_copy_falls_back_to_reencode_when_prepare_overlay_remains(tmp_path: Path) -> None:
     recorder = RecorderManager(tmp_path, ("best",), watchable_trim_start_seconds=12)
     source_path = tmp_path / "sample.mp4"
     source_path.write_bytes(b"video-data")
     started_at = datetime(2026, 1, 1, tzinfo=UTC)
     ended_at = started_at + timedelta(seconds=30)
     captured: dict[str, list[tuple[float, float]]] = {}
+
+    def fake_trim_copy_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+        trim_start_seconds: float,
+    ) -> None:
+        watchable_path.write_bytes(b"watchable")
 
     def fake_render_watchable(
         self,
@@ -548,11 +694,17 @@ def test_watchable_output_applies_trim_start_seconds(tmp_path: Path) -> None:
         keep_ranges: list[tuple[float, float]],
     ) -> None:
         captured["keep_ranges"] = keep_ranges
-        watchable_path.write_bytes(b"watchable")
+        watchable_path.write_bytes(b"reencoded")
 
     with (
-        patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
-        patch.object(RecorderManager, "_repair_watchable_output") as repair_mock,
+        patch.object(
+            RecorderManager,
+            "_trim_copy_watchable",
+            autospec=True,
+            side_effect=fake_trim_copy_watchable,
+        ) as trim_copy_mock,
+        patch.object(RecorderManager, "_has_prepare_overlay_in_prefix", return_value=True) as verify_mock,
+        patch.object(RecorderManager, "_render_watchable", autospec=True, side_effect=fake_render_watchable),
     ):
         _, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
             source_path=source_path,
@@ -565,10 +717,53 @@ def test_watchable_output_applies_trim_start_seconds(tmp_path: Path) -> None:
     assert watchable_error is None
     assert ad_break_count == 0
     assert captured["keep_ranges"] == [(12.0, 30.0)]
-    repair_mock.assert_not_called()
+    trim_copy_mock.assert_called_once()
+    verify_mock.assert_called_once()
+    watchable_context = recorder._consume_last_watchable_context()
+    assert watchable_context.watchable_strategy == "fallback_reencode"
+    assert "trim_copy_fallback" in watchable_context.prepare_mitigation
+    assert "reencode_fallback" in watchable_context.prepare_mitigation
 
 
-def test_watchable_output_uses_timed_id3_fallback_for_ad_breaks(tmp_path: Path) -> None:
+def test_timed_id3_candidate_without_ocr_confirmation_does_not_cut_output(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    source_path = tmp_path / "sample.mp4"
+    source_path.write_bytes(b"video-data")
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    ended_at = started_at + timedelta(seconds=30)
+
+    def fake_remux_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+    ) -> None:
+        watchable_path.write_bytes(b"watchable")
+
+    with (
+        patch.object(RecorderManager, "_extract_timed_id3_ad_offsets", return_value=[(0.0, 10.0)]),
+        patch.object(RecorderManager, "_collect_ocr_ad_windows", return_value=[]),
+        patch.object(RecorderManager, "_remux_watchable", autospec=True, side_effect=fake_remux_watchable) as remux_mock,
+        patch.object(RecorderManager, "_render_watchable") as render_mock,
+    ):
+        _, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
+            source_path=source_path,
+            started_at=started_at,
+            ended_at=ended_at,
+            events=[],
+        )
+
+    assert watchable_state == "ready"
+    assert watchable_error is None
+    assert ad_break_count == 0
+    remux_mock.assert_called_once()
+    render_mock.assert_not_called()
+    watchable_context = recorder._consume_last_watchable_context()
+    assert watchable_context.watchable_strategy == "remux"
+    assert "timed_id3_confirmed_by_ocr" not in watchable_context.ad_detection_sources
+
+
+def test_timed_id3_candidate_confirmed_by_ocr_creates_ad_window(tmp_path: Path) -> None:
     recorder = RecorderManager(tmp_path, ("best",))
     source_path = tmp_path / "sample.mp4"
     source_path.write_bytes(b"video-data")
@@ -588,8 +783,14 @@ def test_watchable_output_uses_timed_id3_fallback_for_ad_breaks(tmp_path: Path) 
 
     with (
         patch.object(RecorderManager, "_extract_timed_id3_ad_offsets", return_value=[(0.0, 10.0)]),
-        patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
-        patch.object(RecorderManager, "_repair_watchable_output", return_value=(None, 0)) as repair_mock,
+        patch.object(RecorderManager, "_collect_ocr_ad_windows", return_value=[(1.0, 8.0)]),
+        patch.object(
+            RecorderManager,
+            "_render_watchable",
+            autospec=True,
+            side_effect=fake_render_watchable,
+        ) as render_mock,
+        patch.object(RecorderManager, "_contains_overlay_in_ranges", return_value=False),
     ):
         _, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
             source_path=source_path,
@@ -602,7 +803,10 @@ def test_watchable_output_uses_timed_id3_fallback_for_ad_breaks(tmp_path: Path) 
     assert watchable_error is None
     assert ad_break_count == 1
     assert captured["keep_ranges"] == [(10.0, 30.0)]
-    repair_mock.assert_called_once()
+    render_mock.assert_called_once()
+    watchable_context = recorder._consume_last_watchable_context()
+    assert watchable_context.watchable_strategy == "segment_transcode"
+    assert "timed_id3_confirmed_by_ocr" in watchable_context.ad_detection_sources
 
 
 def test_watchable_output_falls_back_to_render_when_remux_fails(tmp_path: Path) -> None:
@@ -629,7 +833,6 @@ def test_watchable_output_falls_back_to_render_when_remux_fails(tmp_path: Path) 
             autospec=True,
             side_effect=fake_render_watchable,
         ) as render_mock,
-        patch.object(RecorderManager, "_repair_watchable_output") as repair_mock,
     ):
         watchable_path, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
             source_path=source_path,
@@ -644,10 +847,14 @@ def test_watchable_output_falls_back_to_render_when_remux_fails(tmp_path: Path) 
     assert watchable_path is not None
     remux_mock.assert_called_once()
     render_mock.assert_called_once()
-    repair_mock.assert_not_called()
+    watchable_context = recorder._consume_last_watchable_context()
+    assert watchable_context.watchable_strategy == "fallback_reencode"
+    assert "reencode_fallback" in watchable_context.prepare_mitigation
 
 
-def test_watchable_output_fails_when_verification_still_detects_ad_overlay(tmp_path: Path) -> None:
+def test_watchable_output_fails_when_segment_local_verification_still_detects_overlay(
+    tmp_path: Path,
+) -> None:
     recorder = RecorderManager(tmp_path, ("best",))
     source_path = tmp_path / "sample.mp4"
     source_path.write_bytes(b"video-data")
@@ -663,20 +870,24 @@ def test_watchable_output_fails_when_verification_still_detects_ad_overlay(tmp_p
     ) -> None:
         watchable_path.write_bytes(b"watchable")
 
+    ad_start = started_at + timedelta(seconds=5)
+    ad_end = started_at + timedelta(seconds=10)
+    events = [
+        RecordingEvent(type="recording_started", at=started_at),
+        RecordingEvent(type="ad_break_started", at=ad_start),
+        RecordingEvent(type="ad_break_ended", at=ad_end),
+    ]
+
     with (
-        patch.object(RecorderManager, "_extract_timed_id3_ad_offsets", return_value=[(0.0, 10.0)]),
         patch.object(RecorderManager, "_render_watchable", fake_render_watchable),
-        patch.object(
-            RecorderManager,
-            "_repair_watchable_output",
-            return_value=("watchable verification still detected Twitch playback overlay", 1),
-        ),
+        patch.object(RecorderManager, "_contains_overlay_in_ranges", side_effect=[True, True]),
+        patch.object(RecorderManager, "_reencode_existing_watchable_output"),
     ):
         watchable_path, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
             source_path=source_path,
             started_at=started_at,
             ended_at=ended_at,
-            events=[],
+            events=events,
         )
 
     assert watchable_path is None
@@ -832,6 +1043,12 @@ def test_stop_recording_returns_processing_before_background_finalize_completes(
         assert stop_result.clean_output_path is None
 
         assert finalize_started.wait(timeout=1)
+        processing_metadata = _load_metadata(output_path.with_suffix(".meta.json"))
+        assert processing_metadata["clean_output_state"] == "processing"
+        assert processing_metadata["watchable_processing_seconds"] is None
+        assert "watchable_strategy" in processing_metadata
+        assert "ad_detection_sources" in processing_metadata
+        assert "prepare_mitigation" in processing_metadata
         assert recorder.poll() == []
 
         allow_finalize.set()
