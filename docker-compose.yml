@@ -5,8 +5,8 @@ services:
     container_name: twitch-recorder-backend
     env_file:
       - .env
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     restart: unless-stopped
     volumes:
       - ./recordings:/recordings
@@ -18,7 +18,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     restart: unless-stopped
     volumes:
       - ./frontend:/usr/share/nginx/html:ro
