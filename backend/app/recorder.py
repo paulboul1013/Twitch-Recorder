@@ -1,70 +1,27 @@
 from __future__ import annotations
 
-import json
-import shutil
-import statistics
 import subprocess
-import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
-
-@dataclass(slots=True)
-class RecordingEvent:
-    type: str
-    at: datetime
-    message: str | None = None
-
-    def as_dict(self) -> dict[str, str]:
-        payload: dict[str, str] = {
-            "type": self.type,
-            "at": self.at.isoformat(),
-        }
-        if self.message:
-            payload["message"] = self.message
-        return payload
-
-
-@dataclass(slots=True)
-class ActiveRecording:
-    channel: str
-    process: subprocess.Popen[str]
-    file_path: Path
-    metadata_path: Path
-    started_at: datetime
-    source_mode: str
-    events: list[RecordingEvent] = field(default_factory=list)
-    stderr_tail: list[str] = field(default_factory=list)
-    ad_break_active: bool = False
-    stderr_thread: threading.Thread | None = None
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-@dataclass(slots=True)
-class RecordingResult:
-    channel: str
-    file_path: Path
-    metadata_path: Path
-    started_at: datetime
-    ended_at: datetime
-    exit_code: int
-    state: str
-    source_mode: str
-    clean_output_path: str | None
-    clean_output_state: str
-    clean_output_error: str | None
-    ad_break_count: int
-
-
-@dataclass(slots=True)
-class WatchableMetadataContext:
-    watchable_strategy: str | None = None
-    ad_detection_sources: list[str] = field(default_factory=list)
-    prepare_mitigation: list[str] = field(default_factory=list)
+from .ad_detection import (
+    collect_ad_windows,
+    count_ad_breaks,
+    detect_ad_transition,
+    infer_ad_detection_sources_from_events,
+    merge_offset_ranges,
+    normalize_timed_id3_marker_times,
+    ocr_text_matches_ad_overlay,
+    ocr_text_matches_prepare_overlay,
+    ocr_text_matches_twitch_overlay,
+    ranges_intersect,
+)
+from .api_integration import build_streamlink_command
+from .finalizer import RecordingFinalizer
+from .metadata import RecordingMetadataWriter
+from .recording_types import ActiveRecording, RecordingEvent, RecordingResult, WatchableMetadataContext
 
 
 class RecorderManager:
@@ -102,6 +59,23 @@ class RecorderManager:
         self._state_lock = threading.Lock()
         self._finalize_slots = threading.Semaphore(self.MAX_CONCURRENT_FINALIZERS)
         self._last_watchable_context = WatchableMetadataContext()
+
+        self._metadata_writer = RecordingMetadataWriter(
+            recording_start_delay_seconds=self.recording_start_delay_seconds,
+        )
+        self._finalizer = RecordingFinalizer(
+            recordings_path=self.recordings_path,
+            watchable_trim_start_seconds=self.watchable_trim_start_seconds,
+            ocr_verify_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
+            ocr_hit_padding_seconds=self.OCR_HIT_PADDING_SECONDS,
+            ocr_merge_gap_seconds=self.OCR_MERGE_GAP_SECONDS,
+            ocr_local_validation_padding_seconds=self.OCR_LOCAL_VALIDATION_PADDING_SECONDS,
+            timed_id3_discontinuity_min_seconds=self.TIMED_ID3_DISCONTINUITY_MIN_SECONDS,
+            timed_id3_discontinuity_factor=self.TIMED_ID3_DISCONTINUITY_FACTOR,
+            max_watchable_repair_passes=self.MAX_WATCHABLE_REPAIR_PASSES,
+            trim_prepare_verify_seconds=self.TRIM_PREPARE_VERIFY_SECONDS,
+            segment_verify_neighbor_seconds=self.SEGMENT_VERIFY_NEIGHBOR_SECONDS,
+        )
 
     def is_recording(self, channel: str) -> bool:
         with self._state_lock:
@@ -141,24 +115,13 @@ class RecorderManager:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         output_path = self.recordings_path / f"{channel}_{timestamp}.mp4"
         metadata_path = output_path.with_suffix(".meta.json")
-        quality = ",".join(self.preferred_qualities)
 
-        cmd = [
-            "streamlink",
-            f"https://twitch.tv/{channel}",
-            quality,
-            "-o",
-            str(output_path),
-        ]
-        source_mode = "unauthenticated"
-        if self.twitch_user_oauth_token:
-            cmd.extend(
-                [
-                    "--twitch-api-header",
-                    f"Authorization=OAuth {self.twitch_user_oauth_token}",
-                ]
-            )
-            source_mode = "authenticated"
+        cmd, source_mode = build_streamlink_command(
+            channel=channel,
+            output_path=output_path,
+            preferred_qualities=self.preferred_qualities,
+            twitch_user_oauth_token=self.twitch_user_oauth_token,
+        )
 
         process = subprocess.Popen(
             cmd,
@@ -322,45 +285,7 @@ class RecorderManager:
                 self._append_event(recording, "ad_break_ended", message=line)
 
     def _detect_ad_transition(self, line: str, ad_break_active: bool) -> str | None:
-        lower = line.lower()
-        if any(
-            token in lower
-            for token in (
-                "ad_break_ended",
-                "ad break ended",
-                "commercial break ended",
-                "ads ended",
-                "ads complete",
-                "ad finished",
-            )
-        ):
-            return "ad_break_ended"
-
-        if any(
-            token in lower
-            for token in (
-                "ad_break_started",
-                "ad break started",
-                "commercial break started",
-                "commercial break",
-                "midroll",
-                "mid-roll",
-                "ad break",
-            )
-        ):
-            if any(token in lower for token in ("ended", "finished", "resume", "resuming", "back")):
-                return "ad_break_ended"
-            return "ad_break_started"
-
-        if "discontinuity" in lower and not ad_break_active:
-            return "ad_break_started"
-
-        if ad_break_active and any(
-            token in lower for token in ("resuming stream", "stream resumed", "back to stream", "playback resumed")
-        ):
-            return "ad_break_ended"
-
-        return None
+        return detect_ad_transition(line, ad_break_active)
 
     def _append_event(
         self,
@@ -617,17 +542,13 @@ class RecorderManager:
         )
 
     def _count_ad_breaks(self, events: list[RecordingEvent]) -> int:
-        return sum(1 for event in events if event.type == "ad_break_started")
+        return count_ad_breaks(events)
 
     def _base_prepare_mitigation(self) -> list[str]:
-        if self.recording_start_delay_seconds > 0:
-            return ["start_delay"]
-        return []
+        return self._metadata_writer.base_prepare_mitigation()
 
     def _infer_ad_detection_sources_from_events(self, events: list[RecordingEvent]) -> list[str]:
-        if any(event.type == "ad_break_started" for event in events):
-            return ["stderr"]
-        return []
+        return infer_ad_detection_sources_from_events(events)
 
     def _set_last_watchable_context(
         self,
@@ -663,38 +584,20 @@ class RecorderManager:
         ad_detection_sources: list[str] | None = None,
         prepare_mitigation: list[str] | None = None,
     ) -> None:
-        with recording.lock:
-            events_payload = [event.as_dict() for event in recording.events]
-            stderr_tail = list(recording.stderr_tail)
-        if ad_break_count_override is None:
-            ad_break_count = sum(1 for event in events_payload if event["type"] == "ad_break_started")
-        else:
-            ad_break_count = max(0, int(ad_break_count_override))
-        if ad_detection_sources is None:
-            ad_detection_sources = self._infer_ad_detection_sources_from_events(recording.events)
-        if prepare_mitigation is None:
-            prepare_mitigation = self._base_prepare_mitigation()
-
-        payload = {
-            "channel": recording.channel,
-            "file_path": str(recording.file_path),
-            "started_at": recording.started_at.isoformat(),
-            "ended_at": ended_at.isoformat() if ended_at else None,
-            "exit_code": exit_code,
-            "state": state,
-            "events": events_payload,
-            "streamlink_stderr_tail": stderr_tail,
-            "clean_output_path": clean_output_path,
-            "clean_output_state": clean_output_state,
-            "clean_output_error": clean_output_error,
-            "watchable_processing_seconds": watchable_processing_seconds,
-            "source_mode": recording.source_mode,
-            "ad_break_count": ad_break_count,
-            "watchable_strategy": watchable_strategy,
-            "ad_detection_sources": list(dict.fromkeys(ad_detection_sources)),
-            "prepare_mitigation": list(dict.fromkeys(prepare_mitigation)),
-        }
-        recording.metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._metadata_writer.write(
+            recording=recording,
+            ended_at=ended_at,
+            exit_code=exit_code,
+            state=state,
+            clean_output_path=clean_output_path,
+            clean_output_state=clean_output_state,
+            clean_output_error=clean_output_error,
+            watchable_processing_seconds=watchable_processing_seconds,
+            ad_break_count_override=ad_break_count_override,
+            watchable_strategy=watchable_strategy,
+            ad_detection_sources=ad_detection_sources,
+            prepare_mitigation=prepare_mitigation,
+        )
 
     def _build_watchable_output(
         self,
@@ -874,7 +777,7 @@ class RecorderManager:
             return None, "failed", str(exc), ad_break_count
 
     def _can_remux_watchable(self, *, ad_offsets: list[tuple[float, float]]) -> bool:
-        return not ad_offsets and self.watchable_trim_start_seconds <= 0
+        return self._finalizer.can_remux_watchable(ad_offsets=ad_offsets)
 
     def _trim_copy_watchable(
         self,
@@ -883,35 +786,11 @@ class RecorderManager:
         watchable_path: Path,
         trim_start_seconds: float,
     ) -> None:
-        watchable_path.unlink(missing_ok=True)
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{max(0.0, trim_start_seconds):.3f}",
-            "-i",
-            str(source_path),
-            "-map",
-            "0:v?",
-            "-map",
-            "0:a?",
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(watchable_path),
-        ]
-        result = subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+        self._finalizer.trim_copy_watchable(
+            source_path=source_path,
+            watchable_path=watchable_path,
+            trim_start_seconds=trim_start_seconds,
         )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "ffmpeg trim-copy failed")
 
     def _confirm_timed_id3_ad_offsets_with_ocr(
         self,
@@ -919,47 +798,21 @@ class RecorderManager:
         source_path: Path,
         duration_seconds: float,
     ) -> list[tuple[float, float]]:
-        candidate_offsets = self._extract_timed_id3_ad_offsets(
-            source_path,
-            expected_duration_seconds=duration_seconds,
-        )
-        if not candidate_offsets or duration_seconds <= 0:
-            return []
-
-        expanded_ranges = self._merge_offset_ranges(
-            [
-                (
-                    max(0.0, start - self.OCR_LOCAL_VALIDATION_PADDING_SECONDS),
-                    min(duration_seconds, end + self.OCR_LOCAL_VALIDATION_PADDING_SECONDS),
-                )
-                for start, end in candidate_offsets
-                if end > start
-            ]
-        )
-        if not expanded_ranges:
-            return []
-
-        ocr_hits = self._collect_ocr_ad_windows(
-            source_path,
+        return self._finalizer.confirm_timed_id3_ad_offsets_with_ocr(
+            source_path=source_path,
             duration_seconds=duration_seconds,
-            sample_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
-            sample_ranges=expanded_ranges,
-            matcher=self._ocr_text_matches_ad_overlay,
+            extract_offsets=lambda path, expected_duration: self._extract_timed_id3_ad_offsets(
+                path,
+                expected_duration_seconds=expected_duration,
+            ),
+            collect_ocr_windows=lambda path, duration, interval, sample_ranges, matcher: self._collect_ocr_ad_windows(
+                path,
+                duration_seconds=duration,
+                sample_interval_seconds=interval,
+                sample_ranges=sample_ranges,
+                matcher=matcher,
+            ),
         )
-        if not ocr_hits:
-            return []
-
-        confirmed: list[tuple[float, float]] = []
-        for start, end in candidate_offsets:
-            expanded_start = max(0.0, start - self.OCR_LOCAL_VALIDATION_PADDING_SECONDS)
-            expanded_end = min(duration_seconds, end + self.OCR_LOCAL_VALIDATION_PADDING_SECONDS)
-            if any(
-                self._ranges_intersect((expanded_start, expanded_end), ocr_range)
-                for ocr_range in ocr_hits
-            ):
-                confirmed.append((start, end))
-
-        return self._merge_offset_ranges(confirmed)
 
     def _has_prepare_overlay_in_prefix(
         self,
@@ -967,20 +820,18 @@ class RecorderManager:
         *,
         verify_seconds: float,
     ) -> bool:
-        duration_seconds = self._probe_media_duration(source_path)
-        if duration_seconds is None or duration_seconds <= 0:
-            return True
-        inspect_window = min(duration_seconds, max(0.0, verify_seconds))
-        if inspect_window <= 0:
-            return False
-        overlay_windows = self._collect_ocr_ad_windows(
+        return self._finalizer.has_prepare_overlay_in_prefix(
             source_path,
-            duration_seconds=duration_seconds,
-            sample_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
-            sample_ranges=[(0.0, inspect_window)],
-            matcher=self._ocr_text_matches_prepare_overlay,
+            verify_seconds=verify_seconds,
+            probe_duration=self._probe_media_duration,
+            collect_ocr_windows=lambda path, duration, interval, sample_ranges, matcher: self._collect_ocr_ad_windows(
+                path,
+                duration_seconds=duration,
+                sample_interval_seconds=interval,
+                sample_ranges=sample_ranges,
+                matcher=matcher,
+            ),
         )
-        return bool(overlay_windows)
 
     def _contains_overlay_in_ranges(
         self,
@@ -988,80 +839,47 @@ class RecorderManager:
         *,
         sample_ranges: list[tuple[float, float]],
     ) -> bool:
-        duration_seconds = self._probe_media_duration(source_path)
-        if duration_seconds is None or duration_seconds <= 0:
-            return True
-        overlay_windows = self._collect_ocr_ad_windows(
+        return self._finalizer.contains_overlay_in_ranges(
             source_path,
-            duration_seconds=duration_seconds,
-            sample_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
             sample_ranges=sample_ranges,
-            matcher=self._ocr_text_matches_twitch_overlay,
+            probe_duration=self._probe_media_duration,
+            collect_ocr_windows=lambda path, duration, interval, sample_ranges_arg, matcher: self._collect_ocr_ad_windows(
+                path,
+                duration_seconds=duration,
+                sample_interval_seconds=interval,
+                sample_ranges=sample_ranges_arg,
+                matcher=matcher,
+            ),
         )
-        return bool(overlay_windows)
 
     def _build_segment_verification_ranges(
         self,
         keep_ranges: list[tuple[float, float]],
     ) -> list[tuple[float, float]]:
-        if not keep_ranges:
-            return []
-
-        total_duration = sum(max(0.0, end - start) for start, end in keep_ranges)
-        if total_duration <= 0:
-            return []
-
-        boundary_ranges: list[tuple[float, float]] = []
-        cursor = 0.0
-        for start, end in keep_ranges[:-1]:
-            cursor += max(0.0, end - start)
-            boundary_ranges.append(
-                (
-                    max(0.0, cursor - self.SEGMENT_VERIFY_NEIGHBOR_SECONDS),
-                    min(total_duration, cursor + self.SEGMENT_VERIFY_NEIGHBOR_SECONDS),
-                )
-            )
-
-        # Always include output head/tail neighborhoods to catch boundary leakage.
-        boundary_ranges.append((0.0, min(total_duration, self.SEGMENT_VERIFY_NEIGHBOR_SECONDS)))
-        boundary_ranges.append(
-            (
-                max(0.0, total_duration - self.SEGMENT_VERIFY_NEIGHBOR_SECONDS),
-                total_duration,
-            )
-        )
-        return self._merge_offset_ranges(boundary_ranges)
+        return self._finalizer.build_segment_verification_ranges(keep_ranges)
 
     def _reencode_existing_watchable_output(self, watchable_path: Path) -> None:
-        duration_seconds = self._probe_media_duration(watchable_path)
-        if duration_seconds is None:
-            raise RuntimeError("failed to probe watchable output duration")
-
-        keep_ranges = self._build_keep_ranges_from_offsets(
-            duration_seconds,
-            [],
-            trim_start_seconds=0.0,
+        self._finalizer.reencode_existing_watchable_output(
+            watchable_path,
+            probe_duration=self._probe_media_duration,
+            build_keep_ranges_from_offsets=lambda duration, remove_ranges, trim_start: self._build_keep_ranges_from_offsets(
+                duration,
+                remove_ranges,
+                trim_start_seconds=trim_start,
+            ),
+            render_watchable=lambda source, output, keep_ranges: self._render_watchable(
+                source_path=source,
+                watchable_path=output,
+                keep_ranges=keep_ranges,
+            ),
         )
-        if not keep_ranges:
-            raise RuntimeError("watchable output duration too short to re-encode")
-
-        fallback_path = watchable_path.with_name(f"{watchable_path.stem}.fallback{watchable_path.suffix}")
-        fallback_path.unlink(missing_ok=True)
-        self._render_watchable(
-            source_path=watchable_path,
-            watchable_path=fallback_path,
-            keep_ranges=keep_ranges,
-        )
-        fallback_path.replace(watchable_path)
 
     def _ranges_intersect(
         self,
         left: tuple[float, float],
         right: tuple[float, float],
     ) -> bool:
-        left_start, left_end = left
-        right_start, right_end = right
-        return min(left_end, right_end) > max(left_start, right_start)
+        return ranges_intersect(left, right)
 
     def _remux_watchable(
         self,
@@ -1069,33 +887,10 @@ class RecorderManager:
         source_path: Path,
         watchable_path: Path,
     ) -> None:
-        watchable_path.unlink(missing_ok=True)
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(source_path),
-            "-map",
-            "0:v?",
-            "-map",
-            "0:a?",
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(watchable_path),
-        ]
-        result = subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+        self._finalizer.remux_watchable(
+            source_path=source_path,
+            watchable_path=watchable_path,
         )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "ffmpeg remux failed")
 
     def _collect_timed_id3_ad_windows(
         self,
@@ -1104,26 +899,12 @@ class RecorderManager:
         started_at: datetime,
         duration_seconds: float,
     ) -> list[tuple[datetime, datetime]]:
-        offsets = self._extract_timed_id3_ad_offsets(
-            source_path,
-            expected_duration_seconds=duration_seconds,
+        return self._finalizer.collect_timed_id3_ad_windows(
+            source_path=source_path,
+            started_at=started_at,
+            duration_seconds=duration_seconds,
+            run_cmd=subprocess.run,
         )
-        if not offsets:
-            return []
-
-        windows: list[tuple[datetime, datetime]] = []
-        for start_offset, end_offset in offsets:
-            start = max(0.0, min(duration_seconds, start_offset))
-            end = max(0.0, min(duration_seconds, end_offset))
-            if end <= start:
-                continue
-            windows.append(
-                (
-                    started_at + timedelta(seconds=start),
-                    started_at + timedelta(seconds=end),
-                )
-            )
-        return windows
 
     def _extract_timed_id3_ad_offsets(
         self,
@@ -1131,97 +912,11 @@ class RecorderManager:
         *,
         expected_duration_seconds: float | None = None,
     ) -> list[tuple[float, float]]:
-        cmd = [
-            "ffprobe",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-select_streams",
-            "d:0",
-            "-show_packets",
-            "-show_entries",
-            "packet=pts_time,data",
-            "-show_data",
-            str(source_path),
-        ]
-        result = subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if result.returncode != 0:
-            return []
-
-        current_pts: float | None = None
-        packet_has_ad = False
-        packet_pts: list[float] = []
-        marker_times: list[float] = []
-        ad_tokens = (
-            "content.ad",
-            "stitched-ad",
-            "twitch-ads",
-            "ad_signifier",
-            "amazon-adsystem",
-        )
-
-        def flush_packet() -> None:
-            if current_pts is None:
-                return
-            packet_pts.append(current_pts)
-            if packet_has_ad:
-                marker_times.append(current_pts)
-
-        for raw_line in result.stdout.splitlines():
-            line = raw_line.strip()
-            if line.startswith("pts_time="):
-                flush_packet()
-                try:
-                    current_pts = float(line.split("=", 1)[1])
-                except ValueError:
-                    current_pts = None
-                    packet_has_ad = False
-                    continue
-                packet_has_ad = False
-                continue
-
-            if line == "[/PACKET]":
-                flush_packet()
-                current_pts = None
-                packet_has_ad = False
-                continue
-
-            lower = line.lower()
-            if any(token in lower for token in ad_tokens):
-                packet_has_ad = True
-
-        flush_packet()
-        if not marker_times or not packet_pts:
-            return []
-
-        relative_times = self._normalize_timed_id3_marker_times(
-            packet_pts=packet_pts,
-            marker_times=marker_times,
+        return self._finalizer.extract_timed_id3_ad_offsets(
+            source_path,
             expected_duration_seconds=expected_duration_seconds,
+            run_cmd=subprocess.run,
         )
-        if not relative_times:
-            return []
-
-        max_gap_seconds = 6.0
-        tail_padding_seconds = 2.5
-        windows: list[tuple[float, float]] = []
-        group_start = relative_times[0]
-        previous = relative_times[0]
-
-        for current in relative_times[1:]:
-            if current - previous <= max_gap_seconds:
-                previous = current
-                continue
-            windows.append((group_start, previous + tail_padding_seconds))
-            group_start = current
-            previous = current
-        windows.append((group_start, previous + tail_padding_seconds))
-        return windows
 
     def _normalize_timed_id3_marker_times(
         self,
@@ -1230,74 +925,21 @@ class RecorderManager:
         marker_times: list[float],
         expected_duration_seconds: float | None = None,
     ) -> list[float]:
-        if not packet_pts or not marker_times:
-            return []
-
-        deltas = [
-            current - previous
-            for previous, current in zip(packet_pts, packet_pts[1:])
-            if 0.0 < current - previous <= self.TIMED_ID3_DISCONTINUITY_MIN_SECONDS
-        ]
-        typical_gap = statistics.median(deltas) if deltas else 2.0
-        discontinuity_threshold = max(
-            self.TIMED_ID3_DISCONTINUITY_MIN_SECONDS,
-            typical_gap * self.TIMED_ID3_DISCONTINUITY_FACTOR,
+        return normalize_timed_id3_marker_times(
+            packet_pts=packet_pts,
+            marker_times=marker_times,
+            expected_duration_seconds=expected_duration_seconds,
+            discontinuity_min_seconds=self.TIMED_ID3_DISCONTINUITY_MIN_SECONDS,
+            discontinuity_factor=self.TIMED_ID3_DISCONTINUITY_FACTOR,
         )
 
-        normalized_pts: list[float] = [packet_pts[0]]
-        for previous_raw, current_raw in zip(packet_pts, packet_pts[1:]):
-            delta = current_raw - previous_raw
-            if delta <= 0.0:
-                delta = typical_gap
-            elif expected_duration_seconds is not None and delta > discontinuity_threshold:
-                delta = typical_gap
-            normalized_pts.append(normalized_pts[-1] + delta)
-
-        marker_counts: dict[float, int] = {}
-        for marker in marker_times:
-            marker_counts[marker] = marker_counts.get(marker, 0) + 1
-
-        normalized_markers: list[float] = []
-        for raw_pts, normalized_pts_value in zip(packet_pts, normalized_pts):
-            count = marker_counts.get(raw_pts, 0)
-            if count <= 0:
-                continue
-            normalized_markers.extend([normalized_pts_value] * count)
-
-        if not normalized_markers:
-            return []
-
-        base_pts = normalized_pts[0]
-        relative_times = sorted({max(0.0, pts - base_pts) for pts in normalized_markers})
-        if expected_duration_seconds is None:
-            return relative_times
-        return [
-            offset
-            for offset in relative_times
-            if offset <= expected_duration_seconds + self.TIMED_ID3_DISCONTINUITY_MIN_SECONDS
-        ]
-
     def _collect_ad_windows(
-        self, events: list[RecordingEvent], *, ended_at: datetime
+        self,
+        events: list[RecordingEvent],
+        *,
+        ended_at: datetime,
     ) -> list[tuple[datetime, datetime]]:
-        windows: list[tuple[datetime, datetime]] = []
-        ad_started_at: datetime | None = None
-
-        for event in events:
-            if event.type == "ad_break_started":
-                if ad_started_at is None:
-                    ad_started_at = event.at
-            elif event.type == "ad_break_ended":
-                if ad_started_at is None:
-                    continue
-                if event.at > ad_started_at:
-                    windows.append((ad_started_at, event.at))
-                ad_started_at = None
-
-        if ad_started_at is not None and ended_at > ad_started_at:
-            windows.append((ad_started_at, ended_at))
-
-        return windows
+        return collect_ad_windows(events, ended_at=ended_at)
 
     def _build_keep_ranges(
         self,
@@ -1306,21 +948,10 @@ class RecorderManager:
         ad_windows: list[tuple[datetime, datetime]],
         trim_start_seconds: float = 0.0,
     ) -> list[tuple[float, float]]:
-        duration = max(0.0, (ended_at - started_at).total_seconds())
-        if duration <= 0:
-            return []
-
-        clipped = [
-            (
-                max(0.0, (ad_start - started_at).total_seconds()),
-                min(duration, (ad_end - started_at).total_seconds()),
-            )
-            for ad_start, ad_end in sorted(ad_windows)
-            if ad_end > ad_start
-        ]
-        return self._build_keep_ranges_from_offsets(
-            duration,
-            clipped,
+        return self._finalizer.build_keep_ranges(
+            started_at,
+            ended_at,
+            ad_windows,
             trim_start_seconds=trim_start_seconds,
         )
 
@@ -1331,113 +962,37 @@ class RecorderManager:
         *,
         trim_start_seconds: float = 0.0,
     ) -> list[tuple[float, float]]:
-        if duration_seconds <= 0:
-            return []
-        trim_start = min(duration_seconds, max(0.0, trim_start_seconds))
-
-        merged: list[tuple[float, float]] = []
-        for start, end in sorted(remove_ranges):
-            start = max(trim_start, start)
-            end = min(duration_seconds, end)
-            if end <= start:
-                continue
-            if not merged:
-                merged.append((start, end))
-                continue
-            prev_start, prev_end = merged[-1]
-            if start <= prev_end:
-                merged[-1] = (prev_start, max(prev_end, end))
-            else:
-                merged.append((start, end))
-
-        keep_ranges: list[tuple[float, float]] = []
-        cursor = trim_start
-        for ad_start, ad_end in merged:
-            if ad_start > cursor:
-                keep_ranges.append((cursor, ad_start))
-            cursor = max(cursor, ad_end)
-        if cursor < duration_seconds:
-            keep_ranges.append((cursor, duration_seconds))
-
-        return [(start, end) for start, end in keep_ranges if end - start >= 0.25]
+        return self._finalizer.build_keep_ranges_from_offsets(
+            duration_seconds,
+            remove_ranges,
+            trim_start_seconds=trim_start_seconds,
+        )
 
     def _repair_watchable_output(self, watchable_path: Path) -> tuple[str | None, int]:
-        detected_ad_break_count = 0
-        for _ in range(self.MAX_WATCHABLE_REPAIR_PASSES):
-            duration_seconds = self._probe_media_duration(watchable_path)
-            if duration_seconds is None:
-                return "failed to probe watchable output duration", detected_ad_break_count
-
-            overlay_windows = self._collect_ocr_ad_windows(
-                watchable_path,
-                duration_seconds=duration_seconds,
-                sample_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
-            )
-            if not overlay_windows:
-                return None, detected_ad_break_count
-
-            detected_ad_break_count = max(detected_ad_break_count, len(overlay_windows))
-            keep_ranges = self._build_keep_ranges_from_offsets(
-                duration_seconds,
-                overlay_windows,
-                trim_start_seconds=0.0,
-            )
-            if not keep_ranges:
-                return "Twitch playback overlay covered the entire watchable output", detected_ad_break_count
-
-            repaired_path = watchable_path.with_name(f"{watchable_path.stem}.repair{watchable_path.suffix}")
-            self._render_watchable(
-                source_path=watchable_path,
-                watchable_path=repaired_path,
+        return self._finalizer.repair_watchable_output(
+            watchable_path,
+            probe_duration=self._probe_media_duration,
+            collect_ocr_windows=lambda path, duration, interval, sample_ranges, matcher: self._collect_ocr_ad_windows(
+                path,
+                duration_seconds=duration,
+                sample_interval_seconds=interval,
+                sample_ranges=sample_ranges,
+                matcher=matcher,
+            ),
+            build_keep_ranges_from_offsets=lambda duration, remove_ranges, trim_start: self._build_keep_ranges_from_offsets(
+                duration,
+                remove_ranges,
+                trim_start_seconds=trim_start,
+            ),
+            render_watchable=lambda source, output, keep_ranges: self._render_watchable(
+                source_path=source,
+                watchable_path=output,
                 keep_ranges=keep_ranges,
-            )
-            repaired_path.replace(watchable_path)
-
-        residual_duration = self._probe_media_duration(watchable_path)
-        residual_windows = (
-            self._collect_ocr_ad_windows(
-                watchable_path,
-                duration_seconds=residual_duration,
-                sample_interval_seconds=self.OCR_VERIFY_INTERVAL_SECONDS,
-            )
-            if residual_duration is not None
-            else []
+            ),
         )
-        if residual_windows:
-            detected_ad_break_count = max(detected_ad_break_count, len(residual_windows))
-            return "watchable verification still detected Twitch playback overlay", detected_ad_break_count
-        return None, detected_ad_break_count
 
     def _probe_media_duration(self, source_path: Path) -> float | None:
-        cmd = [
-            "ffprobe",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(source_path),
-        ]
-        try:
-            result = subprocess.run(
-                cmd,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if result.returncode != 0:
-            return None
-        try:
-            duration = float(result.stdout.strip())
-        except ValueError:
-            return None
-        if duration <= 0:
-            return None
-        return duration
+        return self._finalizer.probe_media_duration(source_path)
 
     def _collect_ocr_ad_windows(
         self,
@@ -1446,139 +1001,27 @@ class RecorderManager:
         duration_seconds: float,
         sample_interval_seconds: float,
         sample_ranges: list[tuple[float, float]] | None = None,
-        matcher: Callable[[str], bool] | None = None,
+        matcher=None,
     ) -> list[tuple[float, float]]:
-        if duration_seconds <= 0 or sample_interval_seconds <= 0:
-            return []
-        if matcher is None:
-            matcher = self._ocr_text_matches_twitch_overlay
-
-        scan_ranges = sample_ranges or [(0.0, duration_seconds)]
-        merged_scan_ranges = self._merge_offset_ranges(
-            [
-                (max(0.0, start), min(duration_seconds, end))
-                for start, end in scan_ranges
-                if end > start
-            ]
+        return self._finalizer.collect_ocr_ad_windows(
+            source_path,
+            duration_seconds=duration_seconds,
+            sample_interval_seconds=sample_interval_seconds,
+            sample_ranges=sample_ranges,
+            matcher=matcher,
         )
-        if not merged_scan_ranges:
-            return []
-
-        filter_chain = (
-            "fps=1/"
-            f"{sample_interval_seconds},"
-            "crop=iw*0.78:ih*0.30:iw*0.11:ih*0.24,"
-            "scale=1400:-1,"
-            "format=gray"
-        )
-        with tempfile.TemporaryDirectory(prefix="ocrscan_") as temp_dir:
-            temp_root = Path(temp_dir)
-            hit_windows: list[tuple[float, float]] = []
-            for range_index, (range_start, range_end) in enumerate(merged_scan_ranges):
-                if range_end <= range_start:
-                    continue
-                frame_pattern = f"range_{range_index:03d}_frame_%06d.png"
-                cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                    f"{range_start:.3f}",
-                    "-to",
-                    f"{range_end:.3f}",
-                    "-i",
-                    str(source_path),
-                    "-vf",
-                    filter_chain,
-                    "-start_number",
-                    "0",
-                    str(temp_root / frame_pattern),
-                ]
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        text=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                    )
-                except (OSError, subprocess.SubprocessError):
-                    continue
-                if result.returncode != 0:
-                    continue
-
-                for frame_path in sorted(temp_root.glob(f"range_{range_index:03d}_frame_*.png")):
-                    try:
-                        frame_index = int(frame_path.stem.rsplit("_", 1)[1])
-                    except (IndexError, ValueError):
-                        continue
-                    ocr_text = self._run_tesseract(frame_path)
-                    if not matcher(ocr_text):
-                        continue
-                    sample_time = range_start + (frame_index * sample_interval_seconds)
-                    hit_windows.append(
-                        (
-                            max(0.0, sample_time - self.OCR_HIT_PADDING_SECONDS),
-                            min(duration_seconds, sample_time + self.OCR_HIT_PADDING_SECONDS),
-                        )
-                    )
-
-        return self._merge_offset_ranges(hit_windows, merge_gap_seconds=self.OCR_MERGE_GAP_SECONDS)
 
     def _run_tesseract(self, frame_path: Path) -> str:
-        cmd = [
-            "tesseract",
-            str(frame_path),
-            "stdout",
-            "--psm",
-            "6",
-        ]
-        try:
-            result = subprocess.run(
-                cmd,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        if result.returncode != 0:
-            return ""
-        return result.stdout.lower()
+        return self._finalizer.run_tesseract(frame_path)
 
     def _ocr_text_matches_ad_overlay(self, text: str) -> bool:
-        normalized = " ".join(text.lower().split())
-        if "commercial break in progress" in normalized:
-            return True
-        if "break in progress" in normalized and any(
-            token in normalized for token in ("commercial", "ommercial", "twitch")
-        ):
-            return True
-        return any(
-            token in normalized
-            for token in (
-                "ad break started",
-                "commercial break",
-                "ads in progress",
-            )
-        )
+        return ocr_text_matches_ad_overlay(text)
 
     def _ocr_text_matches_prepare_overlay(self, text: str) -> bool:
-        normalized = " ".join(text.lower().split())
-        collapsed = normalized.replace(" ", "")
-        if any(
-            token in normalized
-            for token in ("preparing your stream", "preparing your strea", "preparing stream")
-        ):
-            return True
-        return any(
-            token in collapsed
-            for token in ("preparingyourstream", "preparingyourstrea", "preparingstream")
-        )
+        return ocr_text_matches_prepare_overlay(text)
 
     def _ocr_text_matches_twitch_overlay(self, text: str) -> bool:
-        return self._ocr_text_matches_ad_overlay(text) or self._ocr_text_matches_prepare_overlay(text)
+        return ocr_text_matches_twitch_overlay(text)
 
     def _merge_offset_ranges(
         self,
@@ -1586,19 +1029,7 @@ class RecorderManager:
         *,
         merge_gap_seconds: float = 0.0,
     ) -> list[tuple[float, float]]:
-        merged: list[tuple[float, float]] = []
-        for start, end in sorted(ranges):
-            if end <= start:
-                continue
-            if not merged:
-                merged.append((start, end))
-                continue
-            prev_start, prev_end = merged[-1]
-            if start <= prev_end + merge_gap_seconds:
-                merged[-1] = (prev_start, max(prev_end, end))
-            else:
-                merged.append((start, end))
-        return merged
+        return merge_offset_ranges(ranges, merge_gap_seconds=merge_gap_seconds)
 
     def _render_watchable(
         self,
@@ -1607,72 +1038,8 @@ class RecorderManager:
         watchable_path: Path,
         keep_ranges: list[tuple[float, float]],
     ) -> None:
-        watchable_path.unlink(missing_ok=True)
-        with tempfile.TemporaryDirectory(prefix="watchable_", dir=str(self.recordings_path)) as temp_dir:
-            temp_root = Path(temp_dir)
-            segment_paths: list[Path] = []
-
-            for index, (start_seconds, end_seconds) in enumerate(keep_ranges):
-                segment_path = temp_root / f"segment_{index:03d}.mp4"
-                cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                    f"{start_seconds:.3f}",
-                    "-to",
-                    f"{end_seconds:.3f}",
-                    "-i",
-                    str(source_path),
-                    "-c:v",
-                    "libx264",
-                    "-c:a",
-                    "aac",
-                    "-movflags",
-                    "+faststart",
-                    str(segment_path),
-                ]
-                result = subprocess.run(cmd, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                if result.returncode != 0:
-                    raise RuntimeError(result.stderr.strip() or "ffmpeg segment render failed")
-                segment_paths.append(segment_path)
-
-            if not segment_paths:
-                raise RuntimeError("no keep ranges were rendered")
-
-            if len(segment_paths) == 1:
-                shutil.move(str(segment_paths[0]), str(watchable_path))
-                return
-
-            concat_file = temp_root / "concat.txt"
-            concat_lines: list[str] = []
-            for segment_path in segment_paths:
-                escaped = str(segment_path).replace("'", "'\\''")
-                concat_lines.append(f"file '{escaped}'\n")
-            concat_file.write_text(
-                "".join(concat_lines),
-                encoding="utf-8",
-            )
-            concat_cmd = [
-                "ffmpeg",
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_file),
-                "-c",
-                "copy",
-                str(watchable_path),
-            ]
-            concat_result = subprocess.run(
-                concat_cmd, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-            )
-            if concat_result.returncode != 0:
-                raise RuntimeError(concat_result.stderr.strip() or "ffmpeg concat failed")
+        self._finalizer.render_watchable(
+            source_path=source_path,
+            watchable_path=watchable_path,
+            keep_ranges=keep_ranges,
+        )

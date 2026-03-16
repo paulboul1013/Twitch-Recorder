@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+
+from .ad_detection import count_ad_breaks, infer_ad_detection_sources_from_events
+from .recording_types import ActiveRecording
+
+
+class RecordingMetadataWriter:
+    def __init__(self, *, recording_start_delay_seconds: int) -> None:
+        self.recording_start_delay_seconds = max(0, int(recording_start_delay_seconds))
+
+    def base_prepare_mitigation(self) -> list[str]:
+        if self.recording_start_delay_seconds > 0:
+            return ["start_delay"]
+        return []
+
+    def write(
+        self,
+        *,
+        recording: ActiveRecording,
+        ended_at: datetime | None,
+        exit_code: int | None,
+        state: str,
+        clean_output_path: str | None,
+        clean_output_state: str,
+        clean_output_error: str | None,
+        watchable_processing_seconds: float | None,
+        ad_break_count_override: int | None = None,
+        watchable_strategy: str | None = None,
+        ad_detection_sources: list[str] | None = None,
+        prepare_mitigation: list[str] | None = None,
+    ) -> None:
+        with recording.lock:
+            events_payload = [event.as_dict() for event in recording.events]
+            stderr_tail = list(recording.stderr_tail)
+            events_snapshot = list(recording.events)
+
+        if ad_break_count_override is None:
+            ad_break_count = count_ad_breaks(events_snapshot)
+        else:
+            ad_break_count = max(0, int(ad_break_count_override))
+
+        if ad_detection_sources is None:
+            ad_detection_sources = infer_ad_detection_sources_from_events(events_snapshot)
+
+        if prepare_mitigation is None:
+            prepare_mitigation = self.base_prepare_mitigation()
+
+        payload = {
+            "channel": recording.channel,
+            "file_path": str(recording.file_path),
+            "started_at": recording.started_at.isoformat(),
+            "ended_at": ended_at.isoformat() if ended_at else None,
+            "exit_code": exit_code,
+            "state": state,
+            "events": events_payload,
+            "streamlink_stderr_tail": stderr_tail,
+            "clean_output_path": clean_output_path,
+            "clean_output_state": clean_output_state,
+            "clean_output_error": clean_output_error,
+            "watchable_processing_seconds": watchable_processing_seconds,
+            "source_mode": recording.source_mode,
+            "ad_break_count": ad_break_count,
+            "watchable_strategy": watchable_strategy,
+            "ad_detection_sources": list(dict.fromkeys(ad_detection_sources)),
+            "prepare_mitigation": list(dict.fromkeys(prepare_mitigation)),
+        }
+        recording.metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
