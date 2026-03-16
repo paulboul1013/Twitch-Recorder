@@ -60,6 +60,12 @@ POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
 RECORDING_START_DELAY_SECONDS=25
 WATCHABLE_TRIM_START_SECONDS=0
+TWITCH_API_BATCH_SIZE=100
+TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS=0.2
+TWITCH_API_MAX_RETRIES=3
+TWITCH_API_BASE_BACKOFF_SECONDS=0.5
+TWITCH_API_MAX_BACKOFF_SECONDS=8.0
+TWITCH_API_RETRY_JITTER_RATIO=0.2
 RECORDINGS_PATH=/recordings
 CONFIG_PATH=/config
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
@@ -71,6 +77,11 @@ Optional values (safe to leave empty):
 - `TWITCH_USER_LOGIN`: optional Twitch login name tied to the token; if omitted, the app still runs in best-effort mode
 - `RECORDING_START_DELAY_SECONDS`: delay recording start after stream goes live (default: 25s) to avoid initial `Preparing your stream` segments; this is the primary mitigation
 - `WATCHABLE_TRIM_START_SECONDS`: fixed number of seconds to trim from the beginning of watchable output (default: 0); use this as a fallback only if the primary start-delay mitigation is still insufficient (common range: `10~20`)
+- `TWITCH_API_BATCH_SIZE`: maximum login names per Helix request (hard cap: 100)
+- `TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS`: minimum gap between Twitch API requests
+- `TWITCH_API_MAX_RETRIES`: retry count for 429 / 5xx / transient network failures
+- `TWITCH_API_BASE_BACKOFF_SECONDS` / `TWITCH_API_MAX_BACKOFF_SECONDS`: exponential backoff window
+- `TWITCH_API_RETRY_JITTER_RATIO`: random jitter ratio to avoid synchronized retry bursts
 
 2. Start the project:
 
