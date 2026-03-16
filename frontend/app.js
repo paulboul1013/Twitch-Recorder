@@ -257,6 +257,15 @@ function createAvatar(name, profileImageUrl) {
   return fallback;
 }
 
+function createStatusDetailRow(labelText, valueText) {
+  const row = document.createElement("div");
+  const label = document.createElement("strong");
+  label.textContent = `${labelText}:`;
+  const valueNode = document.createTextNode(` ${valueText}`);
+  row.append(label, valueNode);
+  return row;
+}
+
 function renderStreamers(streamers) {
   elements.streamerCount.textContent = String(streamers.length);
   elements.streamersList.replaceChildren();
@@ -330,12 +339,14 @@ function renderStatuses(statuses) {
       const liveMotion = document.createElement("div");
       liveMotion.className = "recording-motion";
       liveMotion.setAttribute("aria-hidden", "true");
-      liveMotion.innerHTML = `
-        <span class="recording-dot"></span>
-        <span class="recording-wave"></span>
-        <span class="recording-wave"></span>
-        <span class="recording-wave"></span>
-      `;
+      const recordingDot = document.createElement("span");
+      recordingDot.className = "recording-dot";
+      liveMotion.append(recordingDot);
+      for (let index = 0; index < 3; index += 1) {
+        const recordingWave = document.createElement("span");
+        recordingWave.className = "recording-wave";
+        liveMotion.append(recordingWave);
+      }
       identity.append(liveMotion);
     }
 
@@ -396,21 +407,24 @@ function renderStatuses(statuses) {
 
     const details = document.createElement("div");
     details.className = "status-details";
-    details.innerHTML = `
-      <div><strong>Recording State:</strong> ${formatState(normalizeRecordingState(status.recording_state))}</div>
-      <div><strong>Title:</strong> ${status.title || "N/A"}</div>
-      <div><strong>Game:</strong> ${status.game_name || "N/A"}</div>
-      <div><strong>Viewers:</strong> ${status.viewer_count ?? "N/A"}</div>
-      <div><strong>Live Started:</strong> ${formatDate(status.started_at)}</div>
-      <div><strong>Checked:</strong> ${formatDate(status.last_checked_at)}</div>
-      <div><strong>Offline Since:</strong> ${formatDate(status.offline_since)}</div>
-      <div><strong>Stop After:</strong> ${formatDate(status.stop_after_at)}</div>
-      <div><strong>Recording Started:</strong> ${formatDate(status.recording_started_at)}</div>
-      <div><strong>Recording Ended:</strong> ${formatDate(status.recording_ended_at)}</div>
-      <div><strong>Exit Code:</strong> ${status.recording_exit_code ?? "N/A"}</div>
-      <div><strong>Output:</strong> ${status.output_path || "N/A"}</div>
-      <div><strong>Error:</strong> ${status.last_error || "None"}</div>
-    `;
+    details.append(
+      createStatusDetailRow(
+        "Recording State",
+        formatState(normalizeRecordingState(status.recording_state)),
+      ),
+      createStatusDetailRow("Title", status.title || "N/A"),
+      createStatusDetailRow("Game", status.game_name || "N/A"),
+      createStatusDetailRow("Viewers", String(status.viewer_count ?? "N/A")),
+      createStatusDetailRow("Live Started", formatDate(status.started_at)),
+      createStatusDetailRow("Checked", formatDate(status.last_checked_at)),
+      createStatusDetailRow("Offline Since", formatDate(status.offline_since)),
+      createStatusDetailRow("Stop After", formatDate(status.stop_after_at)),
+      createStatusDetailRow("Recording Started", formatDate(status.recording_started_at)),
+      createStatusDetailRow("Recording Ended", formatDate(status.recording_ended_at)),
+      createStatusDetailRow("Exit Code", String(status.recording_exit_code ?? "N/A")),
+      createStatusDetailRow("Output", status.output_path || "N/A"),
+      createStatusDetailRow("Error", status.last_error || "None"),
+    );
 
     card.append(top, details);
     elements.statusCards.append(card);
