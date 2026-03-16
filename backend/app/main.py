@@ -26,7 +26,16 @@ def build_service(settings: Settings | None = None) -> MonitorService:
     settings.ensure_directories()
     store = StreamerStore(settings.streamers_file)
     recording_store = RecordingHistoryStore(settings.recordings_file)
-    twitch_client = TwitchClient(settings.twitch_client_id, settings.twitch_client_secret)
+    twitch_client = TwitchClient(
+        settings.twitch_client_id,
+        settings.twitch_client_secret,
+        max_batch_size=settings.twitch_api_batch_size,
+        min_request_interval_seconds=settings.twitch_api_min_request_interval_seconds,
+        max_retries=settings.twitch_api_max_retries,
+        base_backoff_seconds=settings.twitch_api_base_backoff_seconds,
+        max_backoff_seconds=settings.twitch_api_max_backoff_seconds,
+        retry_jitter_ratio=settings.twitch_api_retry_jitter_ratio,
+    )
     recorder = RecorderManager(
         settings.recordings_path,
         settings.preferred_qualities,

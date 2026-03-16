@@ -16,6 +16,12 @@ class Settings:
     offline_grace_period_seconds: int = 20
     recording_start_delay_seconds: int = 25
     watchable_trim_start_seconds: int = 0
+    twitch_api_batch_size: int = 100
+    twitch_api_min_request_interval_seconds: float = 0.2
+    twitch_api_max_retries: int = 3
+    twitch_api_base_backoff_seconds: float = 0.5
+    twitch_api_max_backoff_seconds: float = 8.0
+    twitch_api_retry_jitter_ratio: float = 0.2
     recordings_path: Path = Path("recordings")
     config_path: Path = Path("config")
     preferred_qualities: tuple[str, ...] = ("1080p60", "1080p", "720p60", "best")
@@ -56,6 +62,16 @@ class Settings:
             offline_grace_period_seconds=int(os.getenv("OFFLINE_GRACE_PERIOD_SECONDS", "20")),
             recording_start_delay_seconds=int(os.getenv("RECORDING_START_DELAY_SECONDS", "25")),
             watchable_trim_start_seconds=int(os.getenv("WATCHABLE_TRIM_START_SECONDS", "0")),
+            twitch_api_batch_size=int(os.getenv("TWITCH_API_BATCH_SIZE", "100")),
+            twitch_api_min_request_interval_seconds=float(
+                os.getenv("TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS", "0.2")
+            ),
+            twitch_api_max_retries=int(os.getenv("TWITCH_API_MAX_RETRIES", "3")),
+            twitch_api_base_backoff_seconds=float(
+                os.getenv("TWITCH_API_BASE_BACKOFF_SECONDS", "0.5")
+            ),
+            twitch_api_max_backoff_seconds=float(os.getenv("TWITCH_API_MAX_BACKOFF_SECONDS", "8.0")),
+            twitch_api_retry_jitter_ratio=float(os.getenv("TWITCH_API_RETRY_JITTER_RATIO", "0.2")),
             recordings_path=recordings_path,
             config_path=config_path,
             preferred_qualities=qualities or cls.preferred_qualities,
