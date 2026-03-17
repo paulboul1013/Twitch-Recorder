@@ -31,6 +31,9 @@ class RecordingMetadataWriter:
         watchable_strategy: str | None = None,
         ad_detection_sources: list[str] | None = None,
         prepare_mitigation: list[str] | None = None,
+        source_available: bool | None = None,
+        source_deleted_on_success: bool = False,
+        source_delete_error: str | None = None,
     ) -> None:
         with recording.lock:
             events_payload = [event.as_dict() for event in recording.events]
@@ -66,5 +69,12 @@ class RecordingMetadataWriter:
             "watchable_strategy": watchable_strategy,
             "ad_detection_sources": list(dict.fromkeys(ad_detection_sources)),
             "prepare_mitigation": list(dict.fromkeys(prepare_mitigation)),
+            "source_available": (
+                bool(source_available)
+                if source_available is not None
+                else (state == "recording" or recording.file_path.exists())
+            ),
+            "source_deleted_on_success": bool(source_deleted_on_success),
+            "source_delete_error": source_delete_error,
         }
         recording.metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

@@ -46,6 +46,8 @@ class RecorderManager:
         twitch_user_login: str = "",
         watchable_trim_start_seconds: int = 0,
         recording_start_delay_seconds: int = 0,
+        recording_raw_container: str = "ts",
+        delete_raw_on_success: bool = True,
     ) -> None:
         self.recordings_path = recordings_path
         self.preferred_qualities = preferred_qualities
@@ -53,6 +55,9 @@ class RecorderManager:
         self.twitch_user_login = twitch_user_login
         self.watchable_trim_start_seconds = max(0, int(watchable_trim_start_seconds))
         self.recording_start_delay_seconds = max(0, int(recording_start_delay_seconds))
+        normalized_container = recording_raw_container.strip().lower().lstrip(".")
+        self.recording_raw_container = normalized_container or "ts"
+        self.delete_raw_on_success = bool(delete_raw_on_success)
         self._active: dict[str, ActiveRecording] = {}
         self._completed_results: list[RecordingResult] = []
         self._pending_finalizers: dict[str, threading.Thread] = {}
@@ -113,7 +118,7 @@ class RecorderManager:
                 return str(existing.file_path)
 
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        output_path = self.recordings_path / f"{channel}_{timestamp}.mp4"
+        output_path = self.recordings_path / f"{channel}_{timestamp}.{self.recording_raw_container}"
         metadata_path = output_path.with_suffix(".meta.json")
 
         cmd, source_mode = build_streamlink_command(
@@ -121,6 +126,7 @@ class RecorderManager:
             output_path=output_path,
             preferred_qualities=self.preferred_qualities,
             twitch_user_oauth_token=self.twitch_user_oauth_token,
+            raw_container=self.recording_raw_container,
         )
 
         process = subprocess.Popen(
@@ -152,6 +158,7 @@ class RecorderManager:
             clean_output_state="pending",
             clean_output_error=None,
             watchable_processing_seconds=None,
+            source_available=True,
         )
         recording.stderr_thread = self._start_stderr_thread(recording)
         with self._state_lock:
@@ -343,6 +350,7 @@ class RecorderManager:
             clean_output_error=processing_result.clean_output_error,
             watchable_processing_seconds=None,
             ad_break_count_override=processing_result.ad_break_count,
+            source_available=recording.file_path.exists(),
         )
         if run_inline:
             final_result = self._run_finalization_job(
@@ -396,6 +404,7 @@ class RecorderManager:
                         3,
                     ),
                     ad_break_count_override=result.ad_break_count,
+                    source_available=recording.file_path.exists(),
                 )
             self._append_completed_result(result)
             with self._state_lock:
@@ -510,6 +519,15 @@ class RecorderManager:
             ended_at=ended_at,
             events=events_snapshot,
         )
+        (
+            source_available,
+            source_deleted_on_success,
+            source_delete_error,
+        ) = self._apply_source_retention_policy(
+            source_path=recording.file_path,
+            clean_output_path=clean_output_path,
+            clean_output_state=clean_output_state,
+        )
         watchable_context = self._consume_last_watchable_context()
         watchable_processing_seconds = round(max(0.0, time.perf_counter() - processing_started_at), 3)
         self._write_metadata(
@@ -525,6 +543,9 @@ class RecorderManager:
             watchable_strategy=watchable_context.watchable_strategy,
             ad_detection_sources=watchable_context.ad_detection_sources,
             prepare_mitigation=watchable_context.prepare_mitigation,
+            source_available=source_available,
+            source_deleted_on_success=source_deleted_on_success,
+            source_delete_error=source_delete_error,
         )
         return RecordingResult(
             channel=recording.channel,
@@ -539,7 +560,51 @@ class RecorderManager:
             clean_output_state=clean_output_state,
             clean_output_error=clean_output_error,
             ad_break_count=resolved_ad_break_count,
+            source_available=source_available,
+            source_deleted_on_success=source_deleted_on_success,
+            source_delete_error=source_delete_error,
         )
+
+    def _apply_source_retention_policy(
+        self,
+        *,
+        source_path: Path,
+        clean_output_path: str | None,
+        clean_output_state: str,
+    ) -> tuple[bool, bool, str | None]:
+        source_available = source_path.exists()
+        source_deleted_on_success = False
+        source_delete_error: str | None = None
+
+        if not self.delete_raw_on_success:
+            return source_available, source_deleted_on_success, source_delete_error
+
+        if clean_output_state != "ready" or not clean_output_path:
+            return source_available, source_deleted_on_success, source_delete_error
+
+        watchable_path = Path(clean_output_path)
+        if not (watchable_path.exists() and watchable_path.is_file()):
+            return source_available, source_deleted_on_success, source_delete_error
+
+        same_path = source_path == watchable_path
+        if not same_path:
+            try:
+                same_path = source_path.resolve() == watchable_path.resolve()
+            except OSError:
+                same_path = source_path == watchable_path
+        if same_path:
+            return source_available, source_deleted_on_success, source_delete_error
+
+        try:
+            source_path.unlink()
+            source_available = False
+            source_deleted_on_success = True
+        except FileNotFoundError:
+            source_available = False
+        except OSError as exc:
+            source_available = source_path.exists()
+            source_delete_error = str(exc) or "failed to delete source recording file"
+        return source_available, source_deleted_on_success, source_delete_error
 
     def _count_ad_breaks(self, events: list[RecordingEvent]) -> int:
         return count_ad_breaks(events)
@@ -583,6 +648,9 @@ class RecorderManager:
         watchable_strategy: str | None = None,
         ad_detection_sources: list[str] | None = None,
         prepare_mitigation: list[str] | None = None,
+        source_available: bool | None = None,
+        source_deleted_on_success: bool = False,
+        source_delete_error: str | None = None,
     ) -> None:
         self._metadata_writer.write(
             recording=recording,
@@ -597,6 +665,9 @@ class RecorderManager:
             watchable_strategy=watchable_strategy,
             ad_detection_sources=ad_detection_sources,
             prepare_mitigation=prepare_mitigation,
+            source_available=source_available,
+            source_deleted_on_success=source_deleted_on_success,
+            source_delete_error=source_delete_error,
         )
 
     def _build_watchable_output(
@@ -622,7 +693,7 @@ class RecorderManager:
             return None, "failed", "recording duration too short to produce watchable output", 0
 
         trim_start_seconds = float(self.watchable_trim_start_seconds)
-        watchable_path = source_path.with_name(f"{source_path.stem}.watchable{source_path.suffix}")
+        watchable_path = source_path.with_name(f"{source_path.stem}.watchable.mp4")
 
         stderr_windows = self._collect_ad_windows(events, ended_at=ended_at)
         stderr_offsets = self._merge_offset_ranges(

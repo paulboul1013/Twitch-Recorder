@@ -36,13 +36,21 @@ def build_service(settings: Settings | None = None) -> MonitorService:
         max_backoff_seconds=settings.twitch_api_max_backoff_seconds,
         retry_jitter_ratio=settings.twitch_api_retry_jitter_ratio,
     )
+    recorder_kwargs: dict[str, object] = {
+        "twitch_user_oauth_token": settings.twitch_user_oauth_token,
+        "twitch_user_login": settings.twitch_user_login,
+        "watchable_trim_start_seconds": settings.watchable_trim_start_seconds,
+        "recording_start_delay_seconds": settings.recording_start_delay_seconds,
+    }
+    if hasattr(settings, "recording_raw_container"):
+        recorder_kwargs["recording_raw_container"] = settings.recording_raw_container
+    if hasattr(settings, "delete_raw_on_success"):
+        recorder_kwargs["delete_raw_on_success"] = settings.delete_raw_on_success
+
     recorder = RecorderManager(
         settings.recordings_path,
         settings.preferred_qualities,
-        twitch_user_oauth_token=settings.twitch_user_oauth_token,
-        twitch_user_login=settings.twitch_user_login,
-        watchable_trim_start_seconds=settings.watchable_trim_start_seconds,
-        recording_start_delay_seconds=settings.recording_start_delay_seconds,
+        **recorder_kwargs,
     )
     return MonitorService(
         settings=settings,

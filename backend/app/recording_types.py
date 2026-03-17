@@ -52,6 +52,9 @@ class RecordingResult:
     clean_output_state: str
     clean_output_error: str | None
     ad_break_count: int
+    source_available: bool = True
+    source_deleted_on_success: bool = False
+    source_delete_error: str | None = None
 
 
 @dataclass(slots=True)

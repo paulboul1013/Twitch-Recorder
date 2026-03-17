@@ -9,6 +9,7 @@ def build_streamlink_command(
     output_path: Path,
     preferred_qualities: tuple[str, ...],
     twitch_user_oauth_token: str,
+    raw_container: str = "ts",
 ) -> tuple[list[str], str]:
     quality = ",".join(preferred_qualities)
     cmd = [
@@ -28,5 +29,9 @@ def build_streamlink_command(
             ]
         )
         source_mode = "authenticated"
+
+    normalized_container = raw_container.strip().lower().lstrip(".")
+    if normalized_container == "ts":
+        cmd.extend(["--ffmpeg-fout", "mpegts"])
 
     return cmd, source_mode

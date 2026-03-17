@@ -16,6 +16,8 @@ class Settings:
     offline_grace_period_seconds: int = 20
     recording_start_delay_seconds: int = 25
     watchable_trim_start_seconds: int = 0
+    recording_raw_container: str = "ts"
+    delete_raw_on_success: bool = True
     twitch_api_batch_size: int = 100
     twitch_api_min_request_interval_seconds: float = 0.2
     twitch_api_max_retries: int = 3
@@ -62,6 +64,13 @@ class Settings:
             offline_grace_period_seconds=int(os.getenv("OFFLINE_GRACE_PERIOD_SECONDS", "20")),
             recording_start_delay_seconds=int(os.getenv("RECORDING_START_DELAY_SECONDS", "25")),
             watchable_trim_start_seconds=int(os.getenv("WATCHABLE_TRIM_START_SECONDS", "0")),
+            recording_raw_container=(
+                os.getenv("RECORDING_RAW_CONTAINER", "ts").strip().lower().lstrip(".") or "ts"
+            ),
+            delete_raw_on_success=(
+                os.getenv("DELETE_RAW_ON_SUCCESS", "true").strip().lower()
+                not in {"0", "false", "no", "off"}
+            ),
             twitch_api_batch_size=int(os.getenv("TWITCH_API_BATCH_SIZE", "100")),
             twitch_api_min_request_interval_seconds=float(
                 os.getenv("TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS", "0.2")

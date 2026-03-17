@@ -50,6 +50,42 @@ def test_watchable_output_is_remuxed_even_without_ad_windows(tmp_path: Path) -> 
     ocr_mock.assert_not_called()
 
 
+def test_watchable_output_from_ts_source_keeps_mp4_watchable_suffix(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+    source_path = tmp_path / "sample.ts"
+    source_path.write_bytes(b"video-data")
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    ended_at = started_at + timedelta(seconds=30)
+
+    def fake_remux_watchable(
+        self,
+        *,
+        source_path: Path,
+        watchable_path: Path,
+    ) -> None:
+        watchable_path.write_bytes(b"watchable")
+
+    with patch.object(
+        RecorderManager,
+        "_remux_watchable",
+        autospec=True,
+        side_effect=fake_remux_watchable,
+    ):
+        watchable_path, watchable_state, watchable_error, ad_break_count = recorder._build_watchable_output(
+            source_path=source_path,
+            started_at=started_at,
+            ended_at=ended_at,
+            events=[],
+        )
+
+    assert watchable_state == "ready"
+    assert watchable_error is None
+    assert ad_break_count == 0
+    assert watchable_path is not None
+    assert watchable_path.endswith(".watchable.mp4")
+    assert not watchable_path.endswith(".watchable.ts")
+
+
 def test_watchable_output_uses_trim_copy_fast_path_when_trim_enabled(tmp_path: Path) -> None:
     recorder = RecorderManager(tmp_path, ("best",), watchable_trim_start_seconds=12)
     source_path = tmp_path / "sample.mp4"
@@ -448,4 +484,3 @@ def test_background_finalizers_run_one_at_a_time(tmp_path: Path) -> None:
 
     assert len(completed_results) == 2
     assert max_active_finalizers == 1
-
