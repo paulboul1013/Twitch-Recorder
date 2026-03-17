@@ -64,6 +64,8 @@ POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
 RECORDING_START_DELAY_SECONDS=25
 WATCHABLE_TRIM_START_SECONDS=0
+RECORDING_RAW_CONTAINER=ts
+DELETE_RAW_ON_SUCCESS=true
 TWITCH_API_BATCH_SIZE=100
 TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS=0.2
 TWITCH_API_MAX_RETRIES=3
@@ -81,6 +83,8 @@ ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 - `TWITCH_USER_LOGIN`：可選，通常填 Twitch 帳號 login；未填時系統會以 token 情境盡力處理
 - `RECORDING_START_DELAY_SECONDS`：主播開播後延遲幾秒才啟動錄影（預設 25 秒），用來避開開場 `Preparing your stream` 畫面，這是主方案
 - `WATCHABLE_TRIM_START_SECONDS`：watchable 檔案固定裁掉開頭秒數（預設 0 秒）；當主方案仍有殘留時再作為 fallback 調整（常見可設 `10~20`）
+- `RECORDING_RAW_CONTAINER`：原始錄影容器（預設 `ts`）；若要回到舊行為可改成 `mp4`
+- `DELETE_RAW_ON_SUCCESS`：watchable 成功後是否刪除原始檔（預設 `true`）
 - `TWITCH_API_BATCH_SIZE`：每次 Helix 查詢最多送多少個 login（上限 100）
 - `TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS`：每次 Twitch 請求之間最小間隔（秒）
 - `TWITCH_API_MAX_RETRIES`：429 / 5xx / 網路錯誤的最大重試次數
@@ -120,9 +124,9 @@ docker compose up -d --build
 
 所有錄影資料都會存在專案根目錄對應的資料夾：
 
-- `recordings/<channel>_<timestamp>.mp4`：原始錄影檔
+- `recordings/<channel>_<timestamp>.ts`：原始錄影檔（預設）
 - `recordings/<channel>_<timestamp>.watchable.mp4`：可拖曳、可播放的後處理版本
-- `recordings/<channel>_<timestamp>.meta.json`：單次錄影的事件與輸出 metadata，包含 `exit_code` 與 `streamlink_stderr_tail`
+- `recordings/<channel>_<timestamp>.meta.json`：單次錄影的事件與輸出 metadata，包含 `exit_code`、`streamlink_stderr_tail`、`source_available`、`source_deleted_on_success`
 - `config/streamers.json`：監看名單
 - `config/recordings.json`：錄影歷史索引
 
@@ -132,8 +136,9 @@ docker compose up -d --build
 - 有設定 `TWITCH_USER_OAUTH_TOKEN`：系統會先嘗試登入態抓流（best-effort），失敗時自動回退
 - 錄影中會從 `streamlink` 的輸出訊息偵測 ad break；`timed_id3` 只作候選訊號，需局部 OCR 確認後才會採信
 - `.meta.json` 會保留 `streamlink` 的 process `exit_code` 與最後 40 行 stderr，方便追查 `playlist ended`、`stream disconnected`、廣告切流等退出原因
-- 錄影結束後會產生 watchable 後處理檔案：無廣告時優先走 remux / trim-copy 快路徑；只有高信心廣告區段才進入切段轉檔
-- 前端錄影列表目前顯示 watchable 狀態；`/recordings` API 與 `.meta.json` 仍會保留 `ad_break_count` 和 `source_mode`
+- 錄影結束後會產生 watchable 後處理檔案（固定 `.watchable.mp4`）：無廣告時優先走 remux / trim-copy 快路徑；只有高信心廣告區段才進入切段轉檔
+- 預設在 watchable 成功後刪除 raw（`DELETE_RAW_ON_SUCCESS=true`）；若收尾失敗或 watchable 不存在，raw 會保留
+- 前端錄影列表目前顯示 watchable 狀態；`/recordings` API 與 `.meta.json` 仍會保留 `ad_break_count`、`source_mode` 與 raw 可用性欄位
 
 ## 常用指令
 
@@ -170,6 +175,7 @@ docker compose down
 
 ## 已知限制與調校建議
 
-- 原始錄影檔由 `streamlink` 直接寫出，某些播放器可能把它當成不易拖曳的串流格式；平常播放優先使用 `.watchable.mp4`
-- watchable 版本是在錄影結束後才產生；如果錄影太短，或後處理失敗，原始檔仍會保留，但 watchable 狀態可能顯示失敗
+- 原始錄影檔預設是 TS 容器（`RECORDING_RAW_CONTAINER=ts`），平常播放優先使用 `.watchable.mp4`
+- watchable 版本是在錄影結束後才產生；如果錄影太短或後處理失敗，raw 會保留，但 watchable 狀態可能顯示失敗
+- 若你要保留 raw 檔案做除錯，請設 `DELETE_RAW_ON_SUCCESS=false`
 - 若開場仍常錄到 `Preparing your stream`，優先調高 `RECORDING_START_DELAY_SECONDS`（主方案）；若只想讓可播放版本略過開頭，再調整 `WATCHABLE_TRIM_START_SECONDS`（fallback）
