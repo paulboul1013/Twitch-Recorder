@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import httpx
 
+from app.api_integration import build_streamlink_command
 from app.models import StreamStatus
 from app.recorder import RecorderManager
 from app.service import MonitorService
@@ -34,14 +35,16 @@ def test_add_list_and_delete_streamers(tmp_path: Path) -> None:
 def test_recordings_endpoint_lists_saved_files(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         recordings_dir = tmp_path / "recordings"
-        sample = recordings_dir / "alpha_20250301_120000.mp4"
-        sample.write_bytes(b"video-data")
+        source = recordings_dir / "alpha_20250301_120000.ts"
+        watchable = recordings_dir / "alpha_20250301_120000.watchable.mp4"
+        source.write_bytes(b"source-video-data")
+        watchable.write_bytes(b"watchable-video-data")
         service: MonitorService = client.app.state.monitor_service
         service.recording_store.upsert(
             TrackedRecording(
                 channel="alpha",
-                source_file_path=str(sample),
-                watchable_file_path=str(sample),
+                source_file_path=str(source),
+                watchable_file_path=str(watchable),
                 watchable_state="ready",
                 ad_break_count=0,
             )
@@ -53,9 +56,10 @@ def test_recordings_endpoint_lists_saved_files(tmp_path: Path) -> None:
         payload = response.json()
         assert len(payload) == 1
         assert payload[0]["channel"] == "alpha"
-        assert payload[0]["file_name"] == sample.name
-        assert payload[0]["source_file_name"] == sample.name
+        assert payload[0]["file_name"] == source.name
+        assert payload[0]["source_file_name"] == source.name
         assert payload[0]["watchable_available"] is True
+        assert payload[0]["watchable_file_name"] == watchable.name
         assert payload[0]["watchable_state"] == "ready"
         assert payload[0]["ad_break_count"] == 0
 
@@ -68,6 +72,103 @@ def test_recordings_endpoint_ignores_untracked_mp4_files(tmp_path: Path) -> None
         response = client.get("/recordings")
         assert response.status_code == 200
         assert response.json() == []
+
+
+def test_recordings_endpoint_lists_watchable_when_source_is_missing(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        recordings_dir = tmp_path / "recordings"
+        source = recordings_dir / "alpha_20250301_120000.ts"
+        watchable = recordings_dir / "alpha_20250301_120000.watchable.mp4"
+        watchable.write_bytes(b"watchable-video-data")
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(source),
+                watchable_file_path=str(watchable),
+                watchable_state="ready",
+                ad_break_count=0,
+            )
+        )
+
+        response = client.get("/recordings")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 1
+        assert payload[0]["channel"] == "alpha"
+        assert payload[0]["source_file_name"] == source.name
+        assert payload[0]["watchable_file_name"] == watchable.name
+        assert payload[0]["watchable_available"] is True
+        assert payload[0]["source_available"] is False
+
+
+def test_recordings_endpoint_ignores_entries_when_source_and_watchable_are_missing(
+    tmp_path: Path,
+) -> None:
+    with build_test_client(tmp_path) as client:
+        recordings_dir = tmp_path / "recordings"
+        source = recordings_dir / "alpha_20250301_120000.ts"
+        watchable = recordings_dir / "alpha_20250301_120000.watchable.mp4"
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(source),
+                watchable_file_path=str(watchable),
+                watchable_state="ready",
+                ad_break_count=0,
+            )
+        )
+
+        response = client.get("/recordings")
+        assert response.status_code == 200
+        assert response.json() == []
+
+
+def test_recordings_endpoint_prefers_watchable_size_and_timestamp(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        recordings_dir = tmp_path / "recordings"
+        source = recordings_dir / "alpha_20250301_120000.ts"
+        watchable = recordings_dir / "alpha_20250301_120000.watchable.mp4"
+        source.write_bytes(b"raw")
+        watchable.write_bytes(b"watchable-video-data")
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(source),
+                watchable_file_path=str(watchable),
+                watchable_state="ready",
+                ad_break_count=0,
+            )
+        )
+
+        response = client.get("/recordings")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 1
+        assert payload[0]["size_bytes"] == watchable.stat().st_size
+        modified_at = datetime.fromisoformat(payload[0]["modified_at"])
+        assert abs(modified_at.timestamp() - watchable.stat().st_mtime) < 1.0
+
+
+def test_build_streamlink_command_uses_mpegts_for_ts_output_and_oauth_header() -> None:
+    output_path = Path("/tmp/alpha_20260317_120000.ts")
+    cmd, source_mode = build_streamlink_command(
+        channel="alpha",
+        output_path=output_path,
+        preferred_qualities=("1080p60", "best"),
+        twitch_user_oauth_token="token123",
+    )
+
+    assert cmd[:4] == ["streamlink", "https://twitch.tv/alpha", "1080p60,best", "-o"]
+    assert cmd[4] == str(output_path)
+    assert "--ffmpeg-fout" in cmd
+    ffmpeg_fout_index = cmd.index("--ffmpeg-fout")
+    assert cmd[ffmpeg_fout_index + 1] == "mpegts"
+    assert "--twitch-api-header" in cmd
+    assert "Authorization=OAuth token123" in cmd
+    assert source_mode == "authenticated"
 
 
 def test_refresh_without_credentials_reports_status(tmp_path: Path) -> None:
@@ -108,7 +209,7 @@ def test_stop_recording_updates_status_fields(tmp_path: Path) -> None:
             ),
         ):
             output_path = service.recorder.start_recording("alpha")
-            assert output_path.endswith(".mp4")
+            assert output_path.endswith(".ts")
             Path(output_path).write_bytes(b"video-data")
 
             response = client.post("/streamers/alpha/stop")

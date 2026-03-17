@@ -74,6 +74,9 @@ class MonitorService:
                 ended_at=result.ended_at.isoformat(),
                 state=result.state,
                 clean_output_error=result.clean_output_error,
+                source_available=result.source_available,
+                source_deleted_on_success=result.source_deleted_on_success,
+                source_delete_error=result.source_delete_error,
             )
         )
 
@@ -241,42 +244,71 @@ class MonitorService:
     async def list_recordings(self) -> list[RecordingInfo]:
         await self._sync_finished_recordings()
         tracked_recordings = self.recording_store.load()
-        existing_files: list[tuple[Path, TrackedRecording]] = []
+        existing_files: list[tuple[float, int, Path, Path, TrackedRecording, bool, bool, str | None]] = []
         for tracked in tracked_recordings:
-            file_path = Path(tracked.source_file_path)
-            if file_path.exists() and file_path.is_file():
-                existing_files.append((file_path, tracked))
+            source_path = Path(tracked.source_file_path)
+            source_exists = source_path.exists() and source_path.is_file()
 
-        existing_files.sort(key=lambda item: item[0].stat().st_mtime, reverse=True)
-        recordings: list[RecordingInfo] = []
-        for file_path, tracked in existing_files:
-            stat = file_path.stat()
-            watchable_path = tracked.watchable_file_path
-            watchable_available = False
             watchable_name: str | None = None
+            watchable_exists = False
+            watchable_path = tracked.watchable_file_path
+            stat_path = source_path
             if watchable_path:
                 watchable_file = Path(watchable_path)
                 if watchable_file.exists() and watchable_file.is_file():
-                    watchable_available = True
+                    watchable_exists = True
                     watchable_name = watchable_file.name
-                elif watchable_file == file_path and file_path.exists():
-                    watchable_available = True
-                    watchable_name = file_path.name
+                    stat_path = watchable_file
+                elif watchable_file == source_path and source_exists:
+                    watchable_exists = True
+                    watchable_name = source_path.name
+                    stat_path = source_path
+
+            if not (source_exists or watchable_exists):
+                continue
+
+            stat = stat_path.stat()
+            existing_files.append(
+                (
+                    stat.st_mtime,
+                    stat.st_size,
+                    stat_path,
+                    source_path,
+                    tracked,
+                    source_exists,
+                    watchable_exists,
+                    watchable_name,
+                )
+            )
+
+        existing_files.sort(key=lambda item: item[0], reverse=True)
+        recordings: list[RecordingInfo] = []
+        for (
+            modified_ts,
+            size_bytes,
+            _stat_path,
+            source_path,
+            tracked,
+            source_exists,
+            watchable_available,
+            watchable_name,
+        ) in existing_files:
             recordings.append(
                 RecordingInfo(
                     channel=tracked.channel,
-                    file_path=str(file_path),
-                    file_name=file_path.name,
-                    source_file_path=str(file_path),
-                    source_file_name=file_path.name,
-                    watchable_file_path=watchable_path,
+                    file_path=str(source_path),
+                    file_name=source_path.name,
+                    source_file_path=str(source_path),
+                    source_file_name=source_path.name,
+                    source_available=source_exists,
+                    watchable_file_path=tracked.watchable_file_path,
                     watchable_file_name=watchable_name,
                     watchable_available=watchable_available,
                     watchable_state=tracked.watchable_state,
                     ad_break_count=tracked.ad_break_count,
                     source_mode=tracked.source_mode,
-                    size_bytes=stat.st_size,
-                    modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                    size_bytes=size_bytes,
+                    modified_at=datetime.fromtimestamp(modified_ts, tz=UTC),
                 )
             )
         return recordings

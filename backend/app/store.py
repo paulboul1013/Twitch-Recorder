@@ -36,6 +36,9 @@ class TrackedRecording:
     ended_at: str | None = None
     state: str | None = None
     clean_output_error: str | None = None
+    source_available: bool = True
+    source_deleted_on_success: bool = False
+    source_delete_error: str | None = None
 
     @property
     def file_path(self) -> str:
@@ -82,6 +85,9 @@ class RecordingHistoryStore:
             ended_at = item.get("ended_at")
             state = item.get("state")
             clean_output_error = item.get("clean_output_error")
+            source_available_value = item.get("source_available")
+            source_deleted_value = item.get("source_deleted_on_success")
+            source_delete_error = item.get("source_delete_error")
 
             entries.append(
                 TrackedRecording(
@@ -97,6 +103,17 @@ class RecordingHistoryStore:
                     ended_at=str(ended_at).strip() if ended_at else None,
                     state=str(state).strip() if state else None,
                     clean_output_error=str(clean_output_error).strip() if clean_output_error else None,
+                    source_available=(
+                        source_available_value
+                        if isinstance(source_available_value, bool)
+                        else Path(source_file_path).exists()
+                    ),
+                    source_deleted_on_success=(
+                        source_deleted_value if isinstance(source_deleted_value, bool) else False
+                    ),
+                    source_delete_error=(
+                        str(source_delete_error).strip() if source_delete_error else None
+                    ),
                 )
             )
         return entries

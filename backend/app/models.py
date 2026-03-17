@@ -39,6 +39,7 @@ class RecordingInfo(BaseModel):
     file_name: str
     source_file_path: str
     source_file_name: str
+    source_available: bool = True
     watchable_file_path: str | None = None
     watchable_file_name: str | None = None
     watchable_available: bool = False
