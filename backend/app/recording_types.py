@@ -25,12 +25,17 @@ class RecordingEvent:
 
 @dataclass(slots=True)
 class ActiveRecording:
+    recording_id: str
+    artifact_mode: str
     channel: str
     process: subprocess.Popen[str]
     file_path: Path
     metadata_path: Path
     started_at: datetime
     source_mode: str
+    recording_root: Path | None = None
+    full_artifact_path: Path | None = None
+    clean_artifact_path: Path | None = None
     events: list[RecordingEvent] = field(default_factory=list)
     stderr_tail: list[str] = field(default_factory=list)
     ad_break_active: bool = False
@@ -40,6 +45,8 @@ class ActiveRecording:
 
 @dataclass(slots=True)
 class RecordingResult:
+    recording_id: str
+    artifact_mode: str
     channel: str
     file_path: Path
     metadata_path: Path
@@ -48,6 +55,13 @@ class RecordingResult:
     exit_code: int
     state: str
     source_mode: str
+    full_artifact_path: str | None
+    clean_artifact_path: str | None
+    full_segment_count: int
+    clean_segment_count: int
+    clean_export_state: str
+    clean_export_path: str | None
+    clean_export_error: str | None
     clean_output_path: str | None
     clean_output_state: str
     clean_output_error: str | None

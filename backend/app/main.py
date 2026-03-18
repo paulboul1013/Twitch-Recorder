@@ -4,9 +4,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .config import Settings
 from .models import (
+    CleanExportStatusResponse,
     HealthResponse,
     RecordingInfo,
     StartRecordingResponse,
@@ -41,6 +43,8 @@ def build_service(settings: Settings | None = None) -> MonitorService:
         "twitch_user_login": settings.twitch_user_login,
         "watchable_trim_start_seconds": settings.watchable_trim_start_seconds,
         "recording_start_delay_seconds": settings.recording_start_delay_seconds,
+        "recording_mode": settings.recording_mode,
+        "segment_ad_padding_seconds": settings.segment_ad_padding_seconds,
     }
     if hasattr(settings, "recording_raw_container"):
         recorder_kwargs["recording_raw_container"] = settings.recording_raw_container
@@ -136,6 +140,80 @@ def create_app(service: MonitorService | None = None, enable_background: bool = 
         monitor_service: MonitorService = Depends(get_service),
     ) -> list[RecordingInfo]:
         return await monitor_service.list_recordings()
+
+    @app.get("/recordings/{recording_id}/download/full")
+    async def download_full_artifact(
+        recording_id: str,
+        monitor_service: MonitorService = Depends(get_service),
+    ) -> FileResponse:
+        try:
+            artifact_path = monitor_service.get_download_full_path(recording_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return FileResponse(path=artifact_path, filename=artifact_path.name)
+
+    @app.get("/recordings/{recording_id}/download/clean-manifest")
+    async def download_clean_manifest(
+        recording_id: str,
+        monitor_service: MonitorService = Depends(get_service),
+    ) -> FileResponse:
+        try:
+            manifest_path = monitor_service.get_download_clean_manifest_path(recording_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return FileResponse(path=manifest_path, filename=manifest_path.name)
+
+    @app.get("/recordings/{recording_id}/download/clean-mp4")
+    async def download_clean_mp4(
+        recording_id: str,
+        monitor_service: MonitorService = Depends(get_service),
+    ) -> FileResponse:
+        try:
+            export_path = monitor_service.get_download_clean_export_path(recording_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return FileResponse(path=export_path, filename=export_path.name)
+
+    @app.post(
+        "/recordings/{recording_id}/exports/clean-mp4",
+        response_model=CleanExportStatusResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def create_clean_mp4_export(
+        recording_id: str,
+        monitor_service: MonitorService = Depends(get_service),
+    ) -> CleanExportStatusResponse:
+        try:
+            return monitor_service.create_clean_export(recording_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.get(
+        "/recordings/{recording_id}/exports/clean-mp4",
+        response_model=CleanExportStatusResponse,
+    )
+    async def get_clean_mp4_export_status(
+        recording_id: str,
+        monitor_service: MonitorService = Depends(get_service),
+    ) -> CleanExportStatusResponse:
+        try:
+            return monitor_service.get_clean_export_status(recording_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @app.post("/refresh", response_model=list[StreamStatus])
     async def refresh(monitor_service: MonitorService = Depends(get_service)) -> list[StreamStatus]:

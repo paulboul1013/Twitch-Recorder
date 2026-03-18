@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 import subprocess
 import threading
 import time
@@ -46,6 +48,8 @@ class RecorderManager:
         twitch_user_login: str = "",
         watchable_trim_start_seconds: int = 0,
         recording_start_delay_seconds: int = 0,
+        recording_mode: str = "legacy",
+        segment_ad_padding_seconds: float = 2.0,
         recording_raw_container: str = "ts",
         delete_raw_on_success: bool = True,
     ) -> None:
@@ -55,6 +59,11 @@ class RecorderManager:
         self.twitch_user_login = twitch_user_login
         self.watchable_trim_start_seconds = max(0, int(watchable_trim_start_seconds))
         self.recording_start_delay_seconds = max(0, int(recording_start_delay_seconds))
+        normalized_recording_mode = str(recording_mode or "legacy").strip().lower()
+        if normalized_recording_mode not in {"legacy", "segment_native"}:
+            normalized_recording_mode = "legacy"
+        self.recording_mode = normalized_recording_mode
+        self.segment_ad_padding_seconds = max(0.0, float(segment_ad_padding_seconds))
         normalized_container = recording_raw_container.strip().lower().lstrip(".")
         self.recording_raw_container = normalized_container or "ts"
         self.delete_raw_on_success = bool(delete_raw_on_success)
@@ -117,9 +126,27 @@ class RecorderManager:
             if existing is not None:
                 return str(existing.file_path)
 
-        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        output_path = self.recordings_path / f"{channel}_{timestamp}.{self.recording_raw_container}"
-        metadata_path = output_path.with_suffix(".meta.json")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        recording_id = f"{channel}_{timestamp}"
+        recording_root: Path | None = None
+        full_artifact_path: Path | None = None
+        clean_artifact_path: Path | None = None
+        if self.recording_mode == "segment_native":
+            recording_root = self.recordings_path / recording_id
+            segments_dir = recording_root / "segments"
+            manifests_dir = recording_root / "manifests"
+            exports_dir = recording_root / "exports"
+            segments_dir.mkdir(parents=True, exist_ok=True)
+            manifests_dir.mkdir(parents=True, exist_ok=True)
+            exports_dir.mkdir(parents=True, exist_ok=True)
+            output_path = segments_dir / f"segment_000000.{self.recording_raw_container}"
+            metadata_path = recording_root / "recording.meta.json"
+            full_artifact_path = manifests_dir / "full.m3u8"
+            clean_artifact_path = manifests_dir / "clean.m3u8"
+        else:
+            output_path = self.recordings_path / f"{channel}_{timestamp}.{self.recording_raw_container}"
+            metadata_path = output_path.with_suffix(".meta.json")
+            full_artifact_path = output_path
 
         cmd, source_mode = build_streamlink_command(
             channel=channel,
@@ -141,12 +168,17 @@ class RecorderManager:
 
         started_at = datetime.now(UTC)
         recording = ActiveRecording(
+            recording_id=recording_id,
+            artifact_mode=self.recording_mode,
             channel=channel,
             process=process,
             file_path=output_path,
             metadata_path=metadata_path,
             started_at=started_at,
             source_mode=source_mode,
+            recording_root=recording_root,
+            full_artifact_path=full_artifact_path,
+            clean_artifact_path=clean_artifact_path,
         )
         self._append_event(recording, "recording_started", at=started_at)
         self._write_metadata(
@@ -154,6 +186,13 @@ class RecorderManager:
             ended_at=None,
             exit_code=None,
             state="recording",
+            full_artifact_path=str(full_artifact_path) if full_artifact_path else None,
+            clean_artifact_path=str(clean_artifact_path) if clean_artifact_path else None,
+            full_segment_count=0,
+            clean_segment_count=0,
+            clean_export_state="none",
+            clean_export_path=None,
+            clean_export_error=None,
             clean_output_path=None,
             clean_output_state="pending",
             clean_output_error=None,
@@ -345,6 +384,13 @@ class RecorderManager:
             ended_at=ended_at,
             exit_code=exit_code,
             state=state,
+            full_artifact_path=processing_result.full_artifact_path,
+            clean_artifact_path=processing_result.clean_artifact_path,
+            full_segment_count=processing_result.full_segment_count,
+            clean_segment_count=processing_result.clean_segment_count,
+            clean_export_state=processing_result.clean_export_state,
+            clean_export_path=processing_result.clean_export_path,
+            clean_export_error=processing_result.clean_export_error,
             clean_output_path=processing_result.clean_output_path,
             clean_output_state=processing_result.clean_output_state,
             clean_output_error=processing_result.clean_output_error,
@@ -378,6 +424,8 @@ class RecorderManager:
             except Exception as exc:  # pragma: no cover - defensive fallback
                 error_message = str(exc) or "watchable finalization failed unexpectedly"
                 result = RecordingResult(
+                    recording_id=processing_result.recording_id,
+                    artifact_mode=processing_result.artifact_mode,
                     channel=recording.channel,
                     file_path=recording.file_path,
                     metadata_path=recording.metadata_path,
@@ -386,6 +434,13 @@ class RecorderManager:
                     exit_code=exit_code,
                     state=state,
                     source_mode=recording.source_mode,
+                    full_artifact_path=processing_result.full_artifact_path,
+                    clean_artifact_path=processing_result.clean_artifact_path,
+                    full_segment_count=processing_result.full_segment_count,
+                    clean_segment_count=processing_result.clean_segment_count,
+                    clean_export_state=processing_result.clean_export_state,
+                    clean_export_path=processing_result.clean_export_path,
+                    clean_export_error=processing_result.clean_export_error,
                     clean_output_path=None,
                     clean_output_state="failed",
                     clean_output_error=error_message,
@@ -396,6 +451,13 @@ class RecorderManager:
                     ended_at=ended_at,
                     exit_code=exit_code,
                     state=state,
+                    full_artifact_path=processing_result.full_artifact_path,
+                    clean_artifact_path=processing_result.clean_artifact_path,
+                    full_segment_count=processing_result.full_segment_count,
+                    clean_segment_count=processing_result.clean_segment_count,
+                    clean_export_state=processing_result.clean_export_state,
+                    clean_export_path=processing_result.clean_export_path,
+                    clean_export_error=processing_result.clean_export_error,
                     clean_output_path=None,
                     clean_output_state="failed",
                     clean_output_error=error_message,
@@ -477,7 +539,11 @@ class RecorderManager:
         events_snapshot: list[RecordingEvent],
     ) -> RecordingResult:
         ad_break_count = self._count_ad_breaks(events_snapshot)
+        full_artifact_path = recording.full_artifact_path or recording.file_path
+        clean_artifact_path = recording.clean_artifact_path
         return RecordingResult(
+            recording_id=recording.recording_id,
+            artifact_mode=recording.artifact_mode,
             channel=recording.channel,
             file_path=recording.file_path,
             metadata_path=recording.metadata_path,
@@ -486,6 +552,13 @@ class RecorderManager:
             exit_code=exit_code,
             state=state,
             source_mode=recording.source_mode,
+            full_artifact_path=str(full_artifact_path) if full_artifact_path else None,
+            clean_artifact_path=str(clean_artifact_path) if clean_artifact_path else None,
+            full_segment_count=0,
+            clean_segment_count=0,
+            clean_export_state="none",
+            clean_export_path=None,
+            clean_export_error=None,
             clean_output_path=None,
             clean_output_state="processing",
             clean_output_error=None,
@@ -508,26 +581,58 @@ class RecorderManager:
             )
 
         processing_started_at = time.perf_counter()
-        (
-            clean_output_path,
-            clean_output_state,
-            clean_output_error,
-            resolved_ad_break_count,
-        ) = self._build_watchable_output(
-            source_path=recording.file_path,
-            started_at=recording.started_at,
-            ended_at=ended_at,
-            events=events_snapshot,
-        )
-        (
-            source_available,
-            source_deleted_on_success,
-            source_delete_error,
-        ) = self._apply_source_retention_policy(
-            source_path=recording.file_path,
-            clean_output_path=clean_output_path,
-            clean_output_state=clean_output_state,
-        )
+        full_artifact_path = recording.full_artifact_path or recording.file_path
+        clean_artifact_path = recording.clean_artifact_path
+        full_segment_count = 0
+        clean_segment_count = 0
+        clean_export_state = "none"
+        clean_export_path: str | None = None
+        clean_export_error: str | None = None
+        if self.recording_mode == "segment_native":
+            (
+                full_artifact_path,
+                clean_artifact_path,
+                full_segment_count,
+                clean_segment_count,
+                clean_output_state,
+                clean_output_error,
+                resolved_ad_break_count,
+            ) = self._build_segment_native_artifacts(
+                recording=recording,
+                started_at=recording.started_at,
+                ended_at=ended_at,
+                events=events_snapshot,
+            )
+            clean_output_path = clean_artifact_path
+            source_available = recording.file_path.exists()
+            source_deleted_on_success = False
+            source_delete_error = None
+            self._set_last_watchable_context(
+                watchable_strategy="segment_native_manifest",
+                ad_detection_sources=self._infer_ad_detection_sources_from_events(events_snapshot),
+                prepare_mitigation=self._base_prepare_mitigation(),
+            )
+        else:
+            (
+                clean_output_path,
+                clean_output_state,
+                clean_output_error,
+                resolved_ad_break_count,
+            ) = self._build_watchable_output(
+                source_path=recording.file_path,
+                started_at=recording.started_at,
+                ended_at=ended_at,
+                events=events_snapshot,
+            )
+            (
+                source_available,
+                source_deleted_on_success,
+                source_delete_error,
+            ) = self._apply_source_retention_policy(
+                source_path=recording.file_path,
+                clean_output_path=clean_output_path,
+                clean_output_state=clean_output_state,
+            )
         watchable_context = self._consume_last_watchable_context()
         watchable_processing_seconds = round(max(0.0, time.perf_counter() - processing_started_at), 3)
         self._write_metadata(
@@ -535,6 +640,13 @@ class RecorderManager:
             ended_at=ended_at,
             exit_code=exit_code,
             state=state,
+            full_artifact_path=str(full_artifact_path) if full_artifact_path else None,
+            clean_artifact_path=str(clean_artifact_path) if clean_artifact_path else None,
+            full_segment_count=full_segment_count,
+            clean_segment_count=clean_segment_count,
+            clean_export_state=clean_export_state,
+            clean_export_path=clean_export_path,
+            clean_export_error=clean_export_error,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
             clean_output_error=clean_output_error,
@@ -548,6 +660,8 @@ class RecorderManager:
             source_delete_error=source_delete_error,
         )
         return RecordingResult(
+            recording_id=recording.recording_id,
+            artifact_mode=recording.artifact_mode,
             channel=recording.channel,
             file_path=recording.file_path,
             metadata_path=recording.metadata_path,
@@ -556,6 +670,13 @@ class RecorderManager:
             exit_code=exit_code,
             state=state,
             source_mode=recording.source_mode,
+            full_artifact_path=str(full_artifact_path) if full_artifact_path else None,
+            clean_artifact_path=str(clean_artifact_path) if clean_artifact_path else None,
+            full_segment_count=full_segment_count,
+            clean_segment_count=clean_segment_count,
+            clean_export_state=clean_export_state,
+            clean_export_path=clean_export_path,
+            clean_export_error=clean_export_error,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
             clean_output_error=clean_output_error,
@@ -564,6 +685,126 @@ class RecorderManager:
             source_deleted_on_success=source_deleted_on_success,
             source_delete_error=source_delete_error,
         )
+
+    def _build_segment_native_artifacts(
+        self,
+        *,
+        recording: ActiveRecording,
+        started_at: datetime,
+        ended_at: datetime,
+        events: list[RecordingEvent],
+    ) -> tuple[Path, Path, int, int, str, str | None, int]:
+        if recording.recording_root is None:
+            raise RuntimeError("segment-native recording root is missing")
+        if recording.full_artifact_path is None or recording.clean_artifact_path is None:
+            raise RuntimeError("segment-native manifest path is missing")
+        if not recording.file_path.exists():
+            return (
+                recording.full_artifact_path,
+                recording.clean_artifact_path,
+                0,
+                0,
+                "failed",
+                "source recording file does not exist",
+                0,
+            )
+
+        duration_seconds = self._probe_media_duration(recording.file_path)
+        if duration_seconds is None or duration_seconds <= 0:
+            duration_seconds = max(0.0, (ended_at - started_at).total_seconds())
+        if duration_seconds <= 0:
+            return (
+                recording.full_artifact_path,
+                recording.clean_artifact_path,
+                0,
+                0,
+                "failed",
+                "recording duration too short to build segment manifests",
+                0,
+            )
+
+        ad_windows = self._collect_ad_windows(events, ended_at=ended_at)
+        ad_ranges = self._merge_offset_ranges(
+            [
+                (
+                    max(0.0, (ad_start - started_at).total_seconds() - self.segment_ad_padding_seconds),
+                    min(duration_seconds, (ad_end - started_at).total_seconds() + self.segment_ad_padding_seconds),
+                )
+                for ad_start, ad_end in ad_windows
+                if ad_end > ad_start
+            ]
+        )
+
+        relative_segment_path = str(
+            Path("../segments") / recording.file_path.name
+        )
+        segment_range = (0.0, duration_seconds)
+        is_ad = any(self._ranges_intersect(segment_range, ad_range) for ad_range in ad_ranges)
+        segment_index_payload = [
+            {
+                "seq": 0,
+                "start_ts": started_at.isoformat(),
+                "duration": round(duration_seconds, 3),
+                "is_ad": is_ad,
+                "file_path": relative_segment_path,
+            }
+        ]
+
+        segment_index_path = recording.recording_root / "segment_index.json"
+        segment_index_path.write_text(
+            json.dumps(segment_index_payload, indent=2),
+            encoding="utf-8",
+        )
+
+        self._write_hls_manifest(
+            manifest_path=recording.full_artifact_path,
+            segments=segment_index_payload,
+        )
+        clean_segments = [segment for segment in segment_index_payload if not segment["is_ad"]]
+        self._write_hls_manifest(
+            manifest_path=recording.clean_artifact_path,
+            segments=clean_segments,
+        )
+        return (
+            recording.full_artifact_path,
+            recording.clean_artifact_path,
+            len(segment_index_payload),
+            len(clean_segments),
+            "ready",
+            None,
+            len(ad_windows),
+        )
+
+    def _write_hls_manifest(
+        self,
+        *,
+        manifest_path: Path,
+        segments: list[dict[str, object]],
+    ) -> None:
+        max_duration = 1
+        if segments:
+            max_duration = max(
+                1,
+                math.ceil(
+                    max(float(segment.get("duration", 0.0)) for segment in segments)
+                ),
+            )
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            f"#EXT-X-TARGETDURATION:{max_duration}",
+            "#EXT-X-MEDIA-SEQUENCE:0",
+        ]
+        for segment in segments:
+            duration = max(0.001, float(segment.get("duration", 0.0)))
+            file_path = str(segment.get("file_path", "")).strip()
+            if not file_path:
+                continue
+            lines.append(f"#EXTINF:{duration:.3f},")
+            lines.append(file_path)
+        lines.append("#EXT-X-ENDLIST")
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _apply_source_retention_policy(
         self,
@@ -575,6 +816,9 @@ class RecorderManager:
         source_available = source_path.exists()
         source_deleted_on_success = False
         source_delete_error: str | None = None
+
+        if self.recording_mode != "legacy":
+            return source_available, source_deleted_on_success, source_delete_error
 
         if not self.delete_raw_on_success:
             return source_available, source_deleted_on_success, source_delete_error
@@ -640,6 +884,13 @@ class RecorderManager:
         ended_at: datetime | None,
         exit_code: int | None,
         state: str,
+        full_artifact_path: str | None,
+        clean_artifact_path: str | None,
+        full_segment_count: int,
+        clean_segment_count: int,
+        clean_export_state: str,
+        clean_export_path: str | None,
+        clean_export_error: str | None,
         clean_output_path: str | None,
         clean_output_state: str,
         clean_output_error: str | None,
@@ -657,6 +908,13 @@ class RecorderManager:
             ended_at=ended_at,
             exit_code=exit_code,
             state=state,
+            full_artifact_path=full_artifact_path,
+            clean_artifact_path=clean_artifact_path,
+            full_segment_count=full_segment_count,
+            clean_segment_count=clean_segment_count,
+            clean_export_state=clean_export_state,
+            clean_export_path=clean_export_path,
+            clean_export_error=clean_export_error,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
             clean_output_error=clean_output_error,

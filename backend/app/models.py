@@ -34,6 +34,8 @@ class StreamStatus(BaseModel):
 
 
 class RecordingInfo(BaseModel):
+    recording_id: str
+    artifact_mode: str = "legacy"
     channel: str
     file_path: str
     file_name: str
@@ -46,6 +48,13 @@ class RecordingInfo(BaseModel):
     watchable_state: str = "pending"
     ad_break_count: int = 0
     source_mode: str = "unauthenticated"
+    full_artifact_path: str | None = None
+    clean_artifact_path: str | None = None
+    full_segment_count: int = 0
+    clean_segment_count: int = 0
+    clean_export_state: str = "none"
+    clean_export_path: str | None = None
+    clean_export_error: str | None = None
     size_bytes: int
     modified_at: datetime
 
@@ -62,3 +71,11 @@ class StartRecordingResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     ok: bool
+
+
+class CleanExportStatusResponse(BaseModel):
+    recording_id: str
+    job_id: str | None = None
+    state: str
+    output_path: str | None = None
+    error: str | None = None

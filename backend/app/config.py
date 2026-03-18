@@ -15,6 +15,9 @@ class Settings:
     poll_interval_seconds: int = 30
     offline_grace_period_seconds: int = 20
     recording_start_delay_seconds: int = 25
+    recording_mode: str = "segment_native"
+    segment_ad_padding_seconds: float = 2.0
+    clean_export_max_concurrency: int = 1
     watchable_trim_start_seconds: int = 0
     recording_raw_container: str = "ts"
     delete_raw_on_success: bool = True
@@ -63,6 +66,15 @@ class Settings:
             poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),
             offline_grace_period_seconds=int(os.getenv("OFFLINE_GRACE_PERIOD_SECONDS", "20")),
             recording_start_delay_seconds=int(os.getenv("RECORDING_START_DELAY_SECONDS", "25")),
+            recording_mode=(
+                os.getenv("RECORDING_MODE", "segment_native").strip().lower()
+                or "segment_native"
+            ),
+            segment_ad_padding_seconds=float(os.getenv("SEGMENT_AD_PADDING_SECONDS", "2.0")),
+            clean_export_max_concurrency=max(
+                1,
+                int(os.getenv("CLEAN_EXPORT_MAX_CONCURRENCY", "1")),
+            ),
             watchable_trim_start_seconds=int(os.getenv("WATCHABLE_TRIM_START_SECONDS", "0")),
             recording_raw_container=(
                 os.getenv("RECORDING_RAW_CONTAINER", "ts").strip().lower().lstrip(".") or "ts"

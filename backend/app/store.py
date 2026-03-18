@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -27,6 +28,8 @@ class StreamerStore:
 class TrackedRecording:
     channel: str
     source_file_path: str
+    recording_id: str = ""
+    artifact_mode: str = "legacy"
     metadata_path: str | None = None
     watchable_file_path: str | None = None
     watchable_state: str = "pending"
@@ -39,11 +42,58 @@ class TrackedRecording:
     source_available: bool = True
     source_deleted_on_success: bool = False
     source_delete_error: str | None = None
+    full_artifact_path: str | None = None
+    clean_artifact_path: str | None = None
+    full_segment_count: int = 0
+    clean_segment_count: int = 0
+    clean_export_state: str = "none"
+    clean_export_path: str | None = None
+    clean_export_error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.recording_id:
+            self.recording_id = _derive_recording_id(
+                channel=self.channel,
+                source_file_path=self.source_file_path,
+            )
+        normalized_mode = str(self.artifact_mode or "legacy").strip().lower()
+        self.artifact_mode = normalized_mode if normalized_mode in {"legacy", "segment_native"} else "legacy"
+        if not self.full_artifact_path:
+            self.full_artifact_path = self.source_file_path
+        if not self.clean_artifact_path and self.watchable_file_path:
+            self.clean_artifact_path = self.watchable_file_path
+        try:
+            self.full_segment_count = max(0, int(self.full_segment_count))
+        except (TypeError, ValueError):
+            self.full_segment_count = 0
+        try:
+            self.clean_segment_count = max(0, int(self.clean_segment_count))
+        except (TypeError, ValueError):
+            self.clean_segment_count = 0
+        normalized_export_state = str(self.clean_export_state or "none").strip().lower()
+        if normalized_export_state not in {"none", "queued", "processing", "ready", "failed"}:
+            normalized_export_state = "none"
+        self.clean_export_state = normalized_export_state
 
     @property
     def file_path(self) -> str:
         # Backward compatibility for old call sites.
         return self.source_file_path
+
+    @property
+    def effective_full_artifact_path(self) -> str:
+        return self.full_artifact_path or self.source_file_path
+
+    @property
+    def effective_clean_artifact_path(self) -> str | None:
+        return self.clean_artifact_path or self.watchable_file_path
+
+
+def _derive_recording_id(*, channel: str, source_file_path: str) -> str:
+    normalized_channel = str(channel or "recording").strip().lower() or "recording"
+    normalized_source = str(source_file_path or "").strip()
+    digest = hashlib.sha1(f"{normalized_channel}:{normalized_source}".encode("utf-8")).hexdigest()[:12]
+    return f"{normalized_channel}-{digest}"
 
 
 class RecordingHistoryStore:
@@ -59,6 +109,7 @@ class RecordingHistoryStore:
             raise ValueError("recordings store must contain a JSON list")
 
         entries: list[TrackedRecording] = []
+        used_recording_ids: set[str] = set()
         for item in payload:
             if not isinstance(item, dict):
                 continue
@@ -85,6 +136,47 @@ class RecordingHistoryStore:
             ended_at = item.get("ended_at")
             state = item.get("state")
             clean_output_error = item.get("clean_output_error")
+            recording_id = str(item.get("recording_id", "")).strip()
+            if not recording_id:
+                recording_id = _derive_recording_id(
+                    channel=channel,
+                    source_file_path=source_file_path,
+                )
+            unique_recording_id = recording_id
+            suffix = 1
+            while unique_recording_id in used_recording_ids:
+                suffix += 1
+                unique_recording_id = f"{recording_id}-{suffix}"
+            used_recording_ids.add(unique_recording_id)
+
+            artifact_mode = str(item.get("artifact_mode", "legacy")).strip().lower() or "legacy"
+            if artifact_mode not in {"legacy", "segment_native"}:
+                artifact_mode = "legacy"
+
+            full_artifact_value = item.get("full_artifact_path")
+            clean_artifact_value = item.get("clean_artifact_path")
+            if not full_artifact_value:
+                full_artifact_value = source_file_path
+            if not clean_artifact_value and watchable_value:
+                clean_artifact_value = watchable_value
+
+            full_segment_value = item.get("full_segment_count", 0)
+            clean_segment_value = item.get("clean_segment_count", 0)
+            try:
+                full_segment_count = max(0, int(full_segment_value))
+            except (TypeError, ValueError):
+                full_segment_count = 0
+            try:
+                clean_segment_count = max(0, int(clean_segment_value))
+            except (TypeError, ValueError):
+                clean_segment_count = 0
+
+            clean_export_state = str(item.get("clean_export_state", "none")).strip().lower() or "none"
+            if clean_export_state not in {"none", "queued", "processing", "ready", "failed"}:
+                clean_export_state = "none"
+
+            clean_export_path = item.get("clean_export_path")
+            clean_export_error = item.get("clean_export_error")
             source_available_value = item.get("source_available")
             source_deleted_value = item.get("source_deleted_on_success")
             source_delete_error = item.get("source_delete_error")
@@ -93,6 +185,8 @@ class RecordingHistoryStore:
                 TrackedRecording(
                     channel=channel,
                     source_file_path=source_file_path,
+                    recording_id=unique_recording_id,
+                    artifact_mode=artifact_mode,
                     metadata_path=str(metadata_value).strip() if metadata_value else None,
                     watchable_file_path=str(watchable_value).strip() if watchable_value else None,
                     watchable_state=watchable_state,
@@ -114,6 +208,21 @@ class RecordingHistoryStore:
                     source_delete_error=(
                         str(source_delete_error).strip() if source_delete_error else None
                     ),
+                    full_artifact_path=(
+                        str(full_artifact_value).strip() if full_artifact_value else None
+                    ),
+                    clean_artifact_path=(
+                        str(clean_artifact_value).strip() if clean_artifact_value else None
+                    ),
+                    full_segment_count=full_segment_count,
+                    clean_segment_count=clean_segment_count,
+                    clean_export_state=clean_export_state,
+                    clean_export_path=(
+                        str(clean_export_path).strip() if clean_export_path else None
+                    ),
+                    clean_export_error=(
+                        str(clean_export_error).strip() if clean_export_error else None
+                    ),
                 )
             )
         return entries
@@ -126,7 +235,10 @@ class RecordingHistoryStore:
 
     def upsert(self, recording: TrackedRecording) -> None:
         recordings = [
-            item for item in self.load() if item.source_file_path != recording.source_file_path
+            item
+            for item in self.load()
+            if item.recording_id != recording.recording_id
+            and item.source_file_path != recording.source_file_path
         ]
         recordings.insert(0, recording)
         self.save(recordings)
