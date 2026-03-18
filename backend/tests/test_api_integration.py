@@ -153,6 +153,43 @@ def test_recordings_endpoint_prefers_watchable_size_and_timestamp(tmp_path: Path
     assert abs(modified_at.timestamp() - watchable.stat().st_mtime) < 1.0
 
 
+def test_recordings_endpoint_prefers_clean_ts_when_compact_is_ready(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        recordings_dir = tmp_path / "recordings"
+        source = recordings_dir / "alpha_20260318_120000.ts"
+        clean_manifest = recordings_dir / "alpha_20260318_120000" / "manifests" / "clean.m3u8"
+        clean_ts = recordings_dir / "alpha_20260318_120000" / "exports" / "clean.ts"
+        recordings_dir.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"source-video-data")
+        clean_manifest.parent.mkdir(parents=True, exist_ok=True)
+        clean_ts.parent.mkdir(parents=True, exist_ok=True)
+        clean_manifest.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+        clean_ts.write_bytes(b"compact-video-data")
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(source),
+                watchable_file_path=str(clean_manifest),
+                watchable_state="ready",
+                artifact_mode="segment_native",
+                clean_artifact_path=str(clean_manifest),
+                clean_compact_state="ready",
+                clean_compact_path=str(clean_ts),
+                ad_break_count=0,
+            )
+        )
+
+        response = client.get("/recordings")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 1
+        assert payload[0]["clean_compact_state"] == "ready"
+        assert payload[0]["watchable_available"] is True
+        assert payload[0]["watchable_file_name"] == clean_ts.name
+        assert payload[0]["size_bytes"] == clean_ts.stat().st_size
+
+
 def test_recordings_endpoint_lists_active_recording_with_current_file_size(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         service: MonitorService = client.app.state.monitor_service
@@ -275,6 +312,57 @@ def test_segment_native_export_creation_endpoint_returns_queued_job(tmp_path: Pa
             "output_path": None,
             "error": None,
         }
+
+
+def test_segment_native_export_creation_prefers_clean_ts_when_compact_ready(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        recording_root = tmp_path / "recordings" / "alpha_20260318_120000_000003"
+        segments_dir = recording_root / "segments"
+        manifests_dir = recording_root / "manifests"
+        exports_dir = recording_root / "exports"
+        segments_dir.mkdir(parents=True, exist_ok=True)
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        exports_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_path = segments_dir / "segment_000000.ts"
+        clean_manifest = manifests_dir / "clean.m3u8"
+        clean_ts = exports_dir / "clean.ts"
+        segment_path.write_bytes(b"video-data")
+        clean_manifest.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+        clean_ts.write_bytes(b"compact-video-data")
+
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(segment_path),
+                recording_id="rec-segment-3",
+                artifact_mode="segment_native",
+                full_artifact_path=str(manifests_dir / "full.m3u8"),
+                clean_artifact_path=str(clean_manifest),
+                clean_compact_state="ready",
+                clean_compact_path=str(clean_ts),
+                clean_export_state="none",
+                watchable_state="ready",
+            )
+        )
+
+        fake_job = CleanExportJob(
+            job_id="job-2",
+            recording_id="rec-segment-3",
+            state="queued",
+            manifest_path=str(clean_ts),
+            output_path=str(exports_dir / "clean.mp4"),
+            created_at=0.0,
+            updated_at=0.0,
+        )
+        with patch.object(service._clean_export_manager, "enqueue", return_value=fake_job) as enqueue:
+            response = client.post("/recordings/rec-segment-3/exports/clean-mp4")
+
+        assert response.status_code == 202
+        assert response.json()["state"] == "queued"
+        assert enqueue.call_count == 1
+        assert Path(enqueue.call_args.kwargs["manifest_path"]) == clean_ts
 
 
 def test_build_streamlink_command_uses_mpegts_for_ts_output_and_oauth_header() -> None:

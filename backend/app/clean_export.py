@@ -140,22 +140,36 @@ class CleanExportManager:
         manifest_path = Path(job.manifest_path)
         output_path = Path(job.output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-allowed_extensions",
-            "ALL",
-            "-protocol_whitelist",
-            "file,crypto,data",
-            "-i",
-            str(manifest_path),
-            "-c",
-            "copy",
-            str(output_path),
-        ]
+        if manifest_path.suffix.lower() == ".ts":
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(manifest_path),
+                "-c",
+                "copy",
+                str(output_path),
+            ]
+        else:
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-allowed_extensions",
+                "ALL",
+                "-protocol_whitelist",
+                "file,crypto,data",
+                "-i",
+                str(manifest_path),
+                "-c",
+                "copy",
+                str(output_path),
+            ]
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,

@@ -53,6 +53,9 @@ class TrackedRecording:
     source_delete_error: str | None = None
     full_artifact_path: str | None = None
     clean_artifact_path: str | None = None
+    clean_compact_state: str = "none"
+    clean_compact_path: str | None = None
+    clean_compact_error: str | None = None
     full_segment_count: int = 0
     clean_segment_count: int = 0
     clean_export_state: str = "none"
@@ -80,10 +83,15 @@ class TrackedRecording:
             self.clean_segment_count = max(0, int(self.clean_segment_count))
         except (TypeError, ValueError):
             self.clean_segment_count = 0
+        normalized_compact_state = str(self.clean_compact_state or "none").strip().lower()
+        if normalized_compact_state not in {"none", "queued", "processing", "ready", "failed"}:
+            normalized_compact_state = "none"
+        self.clean_compact_state = normalized_compact_state
         normalized_export_state = str(self.clean_export_state or "none").strip().lower()
         if normalized_export_state not in {"none", "queued", "processing", "ready", "failed"}:
             normalized_export_state = "none"
         self.clean_export_state = normalized_export_state
+        self.clean_compact_error = str(self.clean_compact_error).strip() if self.clean_compact_error else None
         self.unknown_ad_confidence = bool(self.unknown_ad_confidence)
 
     @property
@@ -182,6 +190,11 @@ class RecordingHistoryStore:
 
             full_artifact_value = item.get("full_artifact_path")
             clean_artifact_value = item.get("clean_artifact_path")
+            clean_compact_state = str(item.get("clean_compact_state", "none")).strip().lower() or "none"
+            if clean_compact_state not in {"none", "queued", "processing", "ready", "failed"}:
+                clean_compact_state = "none"
+            clean_compact_path = item.get("clean_compact_path")
+            clean_compact_error = item.get("clean_compact_error")
             if not full_artifact_value:
                 full_artifact_value = source_file_path
             if not clean_artifact_value and watchable_value:
@@ -241,6 +254,13 @@ class RecordingHistoryStore:
                     ),
                     clean_artifact_path=(
                         str(clean_artifact_value).strip() if clean_artifact_value else None
+                    ),
+                    clean_compact_state=clean_compact_state,
+                    clean_compact_path=(
+                        str(clean_compact_path).strip() if clean_compact_path else None
+                    ),
+                    clean_compact_error=(
+                        str(clean_compact_error).strip() if clean_compact_error else None
                     ),
                     full_segment_count=full_segment_count,
                     clean_segment_count=clean_segment_count,

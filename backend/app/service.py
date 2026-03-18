@@ -58,7 +58,55 @@ class MonitorService:
             return "failed"
         if tracked.clean_export_state in {"queued", "processing"}:
             return "processing"
-        return "ready"
+        if tracked.clean_export_state == "ready":
+            return "ready"
+        if tracked.clean_compact_state == "ready":
+            return "ready"
+        return tracked.watchable_state
+
+    def _clean_compact_path_if_ready(self, tracked: TrackedRecording) -> Path | None:
+        if tracked.clean_compact_state != "ready" or not tracked.clean_compact_path:
+            return None
+        compact_path = Path(tracked.clean_compact_path)
+        if compact_path.exists() and compact_path.is_file():
+            return compact_path
+        return None
+
+    def _segment_native_watchable_path(self, tracked: TrackedRecording) -> Path | None:
+        if tracked.clean_export_state == "ready" and tracked.clean_export_path:
+            export_path = Path(tracked.clean_export_path)
+            if export_path.exists() and export_path.is_file():
+                return export_path
+        compact_path = self._clean_compact_path_if_ready(tracked)
+        if compact_path is not None:
+            return compact_path
+        clean_artifact_value = tracked.effective_clean_artifact_path
+        if clean_artifact_value:
+            clean_artifact_path = Path(clean_artifact_value)
+            if clean_artifact_path.exists() and clean_artifact_path.is_file():
+                return clean_artifact_path
+        source_path = Path(tracked.source_file_path)
+        if source_path.exists() and source_path.is_file():
+            return source_path
+        return None
+
+    def _segment_native_stat_path(self, tracked: TrackedRecording) -> Path | None:
+        if tracked.clean_export_state == "ready" and tracked.clean_export_path:
+            export_path = Path(tracked.clean_export_path)
+            if export_path.exists() and export_path.is_file():
+                return export_path
+        compact_path = self._clean_compact_path_if_ready(tracked)
+        if compact_path is not None:
+            return compact_path
+        clean_artifact_value = tracked.effective_clean_artifact_path
+        if clean_artifact_value:
+            clean_artifact_path = Path(clean_artifact_value)
+            if clean_artifact_path.exists() and clean_artifact_path.is_file():
+                return clean_artifact_path
+        source_path = Path(tracked.source_file_path)
+        if source_path.exists() and source_path.is_file():
+            return source_path
+        return None
 
     def _on_clean_export_state_change(self, job: CleanExportJob) -> None:
         tracked_recordings = self.recording_store.load()
@@ -111,6 +159,8 @@ class MonitorService:
                 watchable_file_path=(
                     result.clean_export_path
                     if result.clean_export_path
+                    else result.clean_compact_path
+                    if result.clean_compact_state == "ready" and result.clean_compact_path
                     else result.clean_artifact_path or result.clean_output_path
                 ),
                 watchable_state=result.clean_output_state,
@@ -125,6 +175,9 @@ class MonitorService:
                 source_delete_error=result.source_delete_error,
                 full_artifact_path=result.full_artifact_path,
                 clean_artifact_path=result.clean_artifact_path,
+                clean_compact_state=result.clean_compact_state,
+                clean_compact_path=result.clean_compact_path,
+                clean_compact_error=result.clean_compact_error,
                 full_segment_count=result.full_segment_count,
                 clean_segment_count=result.clean_segment_count,
                 clean_export_state=result.clean_export_state,
@@ -323,6 +376,7 @@ class MonitorService:
                 if clean_artifact_path is not None
                 else False
             )
+            compact_artifact_path = self._clean_compact_path_if_ready(tracked)
             clean_export_path = Path(tracked.clean_export_path) if tracked.clean_export_path else None
             clean_export_exists = (
                 clean_export_path.exists() and clean_export_path.is_file()
@@ -334,18 +388,12 @@ class MonitorService:
             watchable_exists = False
             watchable_stat_path: Path | None = None
             if tracked.artifact_mode == "segment_native":
-                if clean_export_exists and clean_export_path is not None:
+                watchable_stat_path = self._segment_native_watchable_path(tracked)
+                if watchable_stat_path is not None:
                     watchable_exists = True
-                    watchable_name = clean_export_path.name
-                    watchable_stat_path = clean_export_path
-                elif clean_artifact_exists and clean_artifact_path is not None:
-                    watchable_exists = True
-                    watchable_name = clean_artifact_path.name
-                    watchable_stat_path = clean_artifact_path
+                    watchable_name = watchable_stat_path.name
                 watchable_state = self._watchable_state_from_tracked_recording(tracked)
-                watchable_path = str(clean_export_path) if clean_export_exists and clean_export_path else (
-                    str(clean_artifact_path) if clean_artifact_exists and clean_artifact_path else None
-                )
+                watchable_path = str(watchable_stat_path) if watchable_stat_path is not None else None
             else:
                 watchable_path = tracked.watchable_file_path
                 watchable_state = tracked.watchable_state
@@ -363,6 +411,8 @@ class MonitorService:
             stat_path: Path | None = None
             if clean_export_exists and clean_export_path is not None:
                 stat_path = clean_export_path
+            elif compact_artifact_path is not None:
+                stat_path = compact_artifact_path
             elif tracked.artifact_mode == "legacy" and watchable_stat_path is not None:
                 stat_path = watchable_stat_path
             elif source_exists:
@@ -425,6 +475,9 @@ class MonitorService:
                     source_mode=tracked.source_mode,
                     full_artifact_path=tracked.effective_full_artifact_path,
                     clean_artifact_path=tracked.effective_clean_artifact_path,
+                    clean_compact_state=tracked.clean_compact_state,
+                    clean_compact_path=tracked.clean_compact_path,
+                    clean_compact_error=tracked.clean_compact_error,
                     full_segment_count=tracked.full_segment_count,
                     clean_segment_count=tracked.clean_segment_count,
                     clean_export_state=tracked.clean_export_state,
@@ -491,6 +544,11 @@ class MonitorService:
                 clean_export_state = "none"
             clean_export_path = str(snapshot.get("clean_export_path", "")).strip() or None
             clean_export_error = str(snapshot.get("clean_export_error", "")).strip() or None
+            clean_compact_state = str(snapshot.get("clean_compact_state", "none")).strip().lower() or "none"
+            if clean_compact_state not in {"none", "queued", "processing", "ready", "failed"}:
+                clean_compact_state = "none"
+            clean_compact_path = str(snapshot.get("clean_compact_path", "")).strip() or None
+            clean_compact_error = str(snapshot.get("clean_compact_error", "")).strip() or None
 
             try:
                 ad_break_count = max(0, int(snapshot.get("ad_break_count", 0)))
@@ -502,7 +560,19 @@ class MonitorService:
             watchable_file_path = None
             watchable_file_name = None
             watchable_available = False
-            if clean_artifact_path:
+            if clean_export_state == "ready" and clean_export_path:
+                clean_export_candidate = Path(clean_export_path)
+                if clean_export_candidate.exists() and clean_export_candidate.is_file():
+                    watchable_file_path = str(clean_export_candidate)
+                    watchable_file_name = clean_export_candidate.name
+                    watchable_available = True
+            elif clean_compact_state == "ready" and clean_compact_path:
+                clean_compact_candidate = Path(clean_compact_path)
+                if clean_compact_candidate.exists() and clean_compact_candidate.is_file():
+                    watchable_file_path = str(clean_compact_candidate)
+                    watchable_file_name = clean_compact_candidate.name
+                    watchable_available = True
+            elif clean_artifact_path:
                 clean_artifact_candidate = Path(clean_artifact_path)
                 if clean_artifact_candidate.exists() and clean_artifact_candidate.is_file():
                     watchable_file_path = str(clean_artifact_candidate)
@@ -527,6 +597,9 @@ class MonitorService:
                 source_mode=source_mode,
                 full_artifact_path=full_artifact_path,
                 clean_artifact_path=clean_artifact_path,
+                clean_compact_state=clean_compact_state,
+                clean_compact_path=clean_compact_path,
+                clean_compact_error=clean_compact_error,
                 full_segment_count=full_segment_count,
                 clean_segment_count=clean_segment_count,
                 clean_export_state=clean_export_state,
@@ -584,6 +657,18 @@ class MonitorService:
             raise FileNotFoundError("clean export file not found")
         return export_path
 
+    def _resolve_clean_export_input_path(self, tracked: TrackedRecording) -> Path:
+        compact_path = self._clean_compact_path_if_ready(tracked)
+        if compact_path is not None:
+            return compact_path
+        clean_manifest_value = tracked.effective_clean_artifact_path
+        if not clean_manifest_value:
+            raise FileNotFoundError("clean manifest not found")
+        clean_manifest_path = Path(clean_manifest_value)
+        if not (clean_manifest_path.exists() and clean_manifest_path.is_file()):
+            raise FileNotFoundError("clean manifest not found")
+        return clean_manifest_path
+
     def create_clean_export(self, recording_id: str) -> CleanExportStatusResponse:
         tracked = self._find_recording_by_id(recording_id)
         if tracked is None:
@@ -591,13 +676,13 @@ class MonitorService:
         if tracked.artifact_mode != "segment_native":
             raise RuntimeError("clean export is not available for legacy recordings")
 
-        clean_manifest_path = self.get_download_clean_manifest_path(recording_id)
-        recording_root = clean_manifest_path.parent.parent
+        clean_input_path = self._resolve_clean_export_input_path(tracked)
+        recording_root = clean_input_path.parent.parent
         output_path = recording_root / "exports" / "clean.mp4"
 
         job = self._clean_export_manager.enqueue(
             recording_id=recording_id,
-            manifest_path=clean_manifest_path,
+            manifest_path=clean_input_path,
             output_path=output_path,
         )
         return CleanExportStatusResponse(

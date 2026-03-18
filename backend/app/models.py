@@ -51,6 +51,9 @@ class RecordingInfo(BaseModel):
     source_mode: str = "unauthenticated"
     full_artifact_path: str | None = None
     clean_artifact_path: str | None = None
+    clean_compact_state: str = "none"
+    clean_compact_path: str | None = None
+    clean_compact_error: str | None = None
     full_segment_count: int = 0
     clean_segment_count: int = 0
     clean_export_state: str = "none"
