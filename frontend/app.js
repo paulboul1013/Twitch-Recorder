@@ -185,6 +185,14 @@ function triggerDownload(path) {
   window.open(`${apiBaseUrl}${path}`, "_blank", "noopener");
 }
 
+function toFileName(pathValue) {
+  if (!pathValue) {
+    return "N/A";
+  }
+  const parts = String(pathValue).split("/");
+  return parts[parts.length - 1] || "N/A";
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -264,6 +272,29 @@ function getCleanExportStatus(recording) {
     text: "Not exported",
     tone: "watchable-pending",
   };
+}
+
+function getCompactStatus(recording) {
+  const state = String(recording.clean_compact_state || "none").toLowerCase();
+  if (state === "queued" || state === "processing") {
+    return {
+      text: "Compacting...",
+      tone: "watchable-pending",
+    };
+  }
+  if (state === "ready") {
+    return {
+      text: `Clean TS ready${recording.clean_compact_path ? ` · ${toFileName(recording.clean_compact_path)}` : ""}`,
+      tone: "watchable-ready",
+    };
+  }
+  if (state === "failed") {
+    return {
+      text: recording.clean_compact_error || "Compact failed",
+      tone: "watchable-failed",
+    };
+  }
+  return null;
 }
 
 function createAvatar(name, profileImageUrl) {
@@ -465,6 +496,7 @@ function renderRecordings(recordings) {
 
   for (const recording of visibleRecordings) {
     const exportStatus = getCleanExportStatus(recording);
+    const compactStatus = getCompactStatus(recording);
     const isSegmentNative = recording.artifact_mode === "segment_native";
     const isRecording = Boolean(recording.is_recording);
     const cleanExportState = String(recording.clean_export_state || "none").toLowerCase();
@@ -481,7 +513,10 @@ function renderRecordings(recordings) {
     const fileMeta = document.createElement("div");
     fileMeta.className = "recording-meta";
     const sourceFileName = recording.source_file_name || recording.file_name || "N/A";
-    fileMeta.textContent = `${sourceFileName} (${formatBytes(recording.size_bytes)})`;
+    const displayFileName = isRecording
+      ? sourceFileName
+      : recording.watchable_file_name || sourceFileName;
+    fileMeta.textContent = `${displayFileName} (${formatBytes(recording.size_bytes)})`;
     channelCell.append(fileMeta);
 
     if (isRecording) {
@@ -496,6 +531,13 @@ function renderRecordings(recordings) {
     exportLabel.className = `watchable-status ${exportStatus.tone}`;
     exportLabel.textContent = exportStatus.text;
     exportCell.append(exportLabel);
+
+    if (compactStatus) {
+      const compactLabel = document.createElement("span");
+      compactLabel.className = `watchable-status ${compactStatus.tone}`;
+      compactLabel.textContent = compactStatus.text;
+      exportCell.append(compactLabel);
+    }
 
     if (recording.unknown_ad_confidence && isSegmentNative) {
       const confidenceHint = document.createElement("div");
@@ -576,7 +618,13 @@ async function refreshRecordings() {
       return true;
     }
     const exportState = String(recording.clean_export_state || "none").toLowerCase();
-    return exportState === "queued" || exportState === "processing";
+    const compactState = String(recording.clean_compact_state || "none").toLowerCase();
+    return (
+      exportState === "queued" ||
+      exportState === "processing" ||
+      compactState === "queued" ||
+      compactState === "processing"
+    );
   });
   if (needsFollowup) {
     scheduleRecordingsFollowupRefresh();
