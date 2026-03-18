@@ -20,7 +20,7 @@ This project is useful if you want to:
 - Stop recording automatically when the stream ends
 - Show who is live and who is currently being recorded
 - List recorded video files
-- Ad-break mitigation pipeline: optional authenticated capture (best-effort) + ad detection + watchable post-processing
+- Ad-break mitigation pipeline: optional authenticated capture (best-effort) + ad detection + clean manifest / clean mp4 export
 
 ## What You Need Before Starting
 
@@ -59,6 +59,9 @@ MAX_CONCURRENT_STREAMERS=3
 POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
 RECORDING_START_DELAY_SECONDS=25
+RECORDING_MODE=segment_native
+SEGMENT_AD_PADDING_SECONDS=2.0
+CLEAN_EXPORT_MAX_CONCURRENCY=1
 WATCHABLE_TRIM_START_SECONDS=0
 TWITCH_API_BATCH_SIZE=100
 TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS=0.2
@@ -76,6 +79,9 @@ Optional values (safe to leave empty):
 - `TWITCH_USER_OAUTH_TOKEN`: user OAuth token for authenticated recording mode to best-effort reduce ads and "prepare your stream" delays
 - `TWITCH_USER_LOGIN`: optional Twitch login name tied to the token; if omitted, the app still runs in best-effort mode
 - `RECORDING_START_DELAY_SECONDS`: delay recording start after stream goes live (default: 25s) to avoid initial `Preparing your stream` segments; this is the primary mitigation
+- `RECORDING_MODE`: recording artifact mode; default is `segment_native` (new flow). Set `legacy` to keep the old watchable-finalize flow
+- `SEGMENT_AD_PADDING_SECONDS`: conservative ad-cut padding for clean manifest generation in `segment_native` mode (default: `2.0`)
+- `CLEAN_EXPORT_MAX_CONCURRENCY`: max concurrent clean mp4 export workers (default: `1`)
 - `WATCHABLE_TRIM_START_SECONDS`: fixed number of seconds to trim from the beginning of watchable output (default: 0); use this as a fallback only if the primary start-delay mitigation is still insufficient (common range: `10~20`)
 - `TWITCH_API_BATCH_SIZE`: maximum login names per Helix request (hard cap: 100)
 - `TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS`: minimum gap between Twitch API requests
@@ -100,7 +106,7 @@ docker compose up -d --build
 3. Click the add button.
 4. The app will keep checking whether the streamer is live.
 5. When the stream starts, recording starts automatically.
-6. Recorded files are saved in the `recordings/` folder.
+6. Recorded segments/manifests (and optional clean mp4 exports) are saved in the `recordings/` folder.
 
 ## What You Will See On The Dashboard
 
@@ -114,7 +120,13 @@ docker compose up -d --build
 
 ## Where Recordings Are Saved
 
-All recorded files are stored in the `recordings/` folder inside this project.
+Default `segment_native` mode writes:
+
+- `recordings/<recording_id>/segments/segment_000000.ts`
+- `recordings/<recording_id>/manifests/full.m3u8`
+- `recordings/<recording_id>/manifests/clean.m3u8`
+- `recordings/<recording_id>/exports/clean.mp4` (on-demand export)
+- `recordings/<recording_id>/recording.meta.json`
 
 ## Ad-Break Mitigation (Hybrid Mode)
 
@@ -122,7 +134,7 @@ All recorded files are stored in the `recordings/` folder inside this project.
 - With `TWITCH_USER_OAUTH_TOKEN`: recorder first attempts authenticated capture (best-effort), then automatically falls back if needed
 - Recorder events are treated as high-confidence ad signals; `timed_id3` is only a candidate and must be confirmed by localized OCR before being used as an ad cut
 - Watchable output now prefers fast paths (remux / trim-copy) when no high-confidence ad windows are present; segment transcode is used only when ad windows are confirmed
-- The recordings list (API and dashboard) includes watchable status and ad break count
+- The recordings list (API and dashboard) includes full/clean artifact paths, clean export status, and ad break count
 
 ## Common Commands
 
