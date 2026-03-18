@@ -153,6 +153,31 @@ def test_recordings_endpoint_prefers_watchable_size_and_timestamp(tmp_path: Path
     assert abs(modified_at.timestamp() - watchable.stat().st_mtime) < 1.0
 
 
+def test_recordings_endpoint_lists_active_recording_with_current_file_size(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        service: MonitorService = client.app.state.monitor_service
+        with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()):
+            output_path = Path(service.recorder.start_recording("alpha"))
+        output_path.write_bytes(b"active-recording-data")
+
+        response = client.get("/recordings")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 1
+        assert payload[0]["channel"] == "alpha"
+        assert payload[0]["is_recording"] is True
+        assert payload[0]["source_file_name"] == output_path.name
+        assert payload[0]["size_bytes"] == output_path.stat().st_size
+
+        with patch.object(
+            RecorderManager,
+            "_build_watchable_output",
+            side_effect=lambda self, **kwargs: (str(kwargs["source_path"]), "ready", None, 0),
+            autospec=True,
+        ):
+            service.recorder.stop_all(wait_for_finalize=True)
+
+
 def test_segment_native_download_and_export_status_endpoints(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         recording_root = tmp_path / "recordings" / "alpha_20250301_120000_000001"

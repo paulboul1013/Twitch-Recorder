@@ -86,6 +86,106 @@ def collect_ad_windows(
     return windows
 
 
+def _split_m3u8_attributes(payload: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    for char in payload:
+        if char == '"':
+            in_quotes = not in_quotes
+            current.append(char)
+            continue
+        if char == "," and not in_quotes:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            continue
+        current.append(char)
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def parse_m3u8_attribute_list(payload: str) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+    for part in _split_m3u8_attributes(payload):
+        if "=" not in part:
+            continue
+        key, raw_value = part.split("=", 1)
+        key = key.strip()
+        value = raw_value.strip()
+        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+            value = value[1:-1]
+        attributes[key] = value
+    return attributes
+
+
+def _parse_iso8601(value: str) -> datetime | None:
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def parse_twitch_daterange_ad_windows(playlist_text: str) -> tuple[list[tuple[datetime, datetime]], bool]:
+    windows: list[tuple[datetime, datetime]] = []
+    markers_seen = False
+    for raw_line in playlist_text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("#EXT-X-DATERANGE:"):
+            continue
+        attributes = parse_m3u8_attribute_list(line.split(":", 1)[1])
+        ad_class = str(attributes.get("CLASS", "")).lower()
+        ad_id = str(attributes.get("ID", "")).lower()
+        has_twitch_ad_field = any(key.startswith("X-TV-TWITCH-AD") for key in attributes)
+        if not (
+            has_twitch_ad_field
+            or "stitched-ad" in ad_class
+            or "ad" in ad_class
+            or "stitched-ad" in ad_id
+        ):
+            continue
+
+        start_raw = attributes.get("START-DATE")
+        if not start_raw:
+            continue
+        start_dt = _parse_iso8601(start_raw)
+        if start_dt is None:
+            continue
+
+        end_dt: datetime | None = None
+        end_raw = attributes.get("END-DATE")
+        if end_raw:
+            end_dt = _parse_iso8601(end_raw)
+
+        if end_dt is None:
+            duration_raw = attributes.get("DURATION") or attributes.get("PLANNED-DURATION")
+            if duration_raw:
+                try:
+                    duration_seconds = float(duration_raw)
+                except ValueError:
+                    duration_seconds = 0.0
+                if duration_seconds > 0:
+                    end_dt = start_dt + timedelta(seconds=duration_seconds)
+
+        if end_dt is None:
+            continue
+        if end_dt <= start_dt:
+            continue
+        markers_seen = True
+        windows.append((start_dt, end_dt))
+
+    windows.sort(key=lambda item: item[0])
+    return windows, markers_seen
+
+
 def merge_offset_ranges(
     ranges: list[tuple[float, float]],
     *,

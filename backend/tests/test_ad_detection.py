@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+from app.ad_detection import parse_twitch_daterange_ad_windows
 from app.recorder import RecorderManager
 
 def test_extract_timed_id3_ad_offsets_groups_consecutive_markers() -> None:
@@ -99,4 +100,32 @@ def test_ocr_text_matches_twitch_overlay_detects_preparing_stream() -> None:
     assert recorder._ocr_text_matches_twitch_overlay("preparing stream")
     assert not recorder._ocr_text_matches_twitch_overlay("live gameplay with no overlay")
 
+
+def test_parse_twitch_daterange_ad_windows_extracts_ad_ranges() -> None:
+    playlist_text = """
+#EXTM3U
+#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-03-18T12:00:00Z",END-DATE="2026-03-18T12:00:30Z",X-TV-TWITCH-AD-RADS-TOKEN="abc"
+#EXT-X-DATERANGE:ID="stitched-ad-2",CLASS="twitch-stitched-ad",START-DATE="2026-03-18T12:01:00Z",DURATION=15.0,X-TV-TWITCH-AD-RADS-TOKEN="def"
+"""
+    windows, markers_seen = parse_twitch_daterange_ad_windows(playlist_text)
+
+    assert markers_seen is True
+    assert len(windows) == 2
+    assert windows[0][0].isoformat().startswith("2026-03-18T12:00:00")
+    assert windows[0][1].isoformat().startswith("2026-03-18T12:00:30")
+    assert windows[1][0].isoformat().startswith("2026-03-18T12:01:00")
+    assert windows[1][1].isoformat().startswith("2026-03-18T12:01:15")
+
+
+def test_parse_twitch_daterange_ad_windows_reports_unknown_when_markers_missing() -> None:
+    playlist_text = """
+#EXTM3U
+#EXT-X-VERSION:3
+#EXTINF:6.000,
+segment.ts
+"""
+    windows, markers_seen = parse_twitch_daterange_ad_windows(playlist_text)
+
+    assert windows == []
+    assert markers_seen is False
 

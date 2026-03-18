@@ -122,7 +122,7 @@ docker compose up -d --build
 
 Default `segment_native` mode writes:
 
-- `recordings/<recording_id>/segments/segment_000000.ts`
+- `recordings/<recording_id>/segments/segment_000000.ts`, `segment_000001.ts`, ...
 - `recordings/<recording_id>/manifests/full.m3u8`
 - `recordings/<recording_id>/manifests/clean.m3u8`
 - `recordings/<recording_id>/exports/clean.mp4` (on-demand export)

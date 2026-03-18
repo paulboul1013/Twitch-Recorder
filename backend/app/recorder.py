@@ -5,8 +5,10 @@ import math
 import subprocess
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import httpx
 
 from .ad_detection import (
     collect_ad_windows,
@@ -18,9 +20,10 @@ from .ad_detection import (
     ocr_text_matches_ad_overlay,
     ocr_text_matches_prepare_overlay,
     ocr_text_matches_twitch_overlay,
+    parse_twitch_daterange_ad_windows,
     ranges_intersect,
 )
-from .api_integration import build_streamlink_command
+from .api_integration import build_streamlink_command, build_streamlink_stream_url_command
 from .finalizer import RecordingFinalizer
 from .metadata import RecordingMetadataWriter
 from .recording_types import ActiveRecording, RecordingEvent, RecordingResult, WatchableMetadataContext
@@ -39,6 +42,8 @@ class RecorderManager:
     MAX_CONCURRENT_FINALIZERS = 1
     TRIM_PREPARE_VERIFY_SECONDS = 30.0
     SEGMENT_VERIFY_NEIGHBOR_SECONDS = 10.0
+    SEGMENT_DURATION_SECONDS = 10.0
+    PLAYLIST_POLL_INTERVAL_SECONDS = 5.0
 
     def __init__(
         self,
@@ -94,7 +99,7 @@ class RecorderManager:
     def is_recording(self, channel: str) -> bool:
         with self._state_lock:
             recording = self._active.get(channel)
-        return bool(recording and recording.process.poll() is None)
+        return bool(recording and self._is_recording_running(recording))
 
     def is_in_ad_break(self, channel: str) -> bool:
         recording = self._active.get(channel)
@@ -108,6 +113,8 @@ class RecorderManager:
             recording = self._active.get(channel)
         if not recording:
             return None
+        if recording.artifact_mode == "segment_native" and recording.full_artifact_path is not None:
+            return str(recording.full_artifact_path)
         return str(recording.file_path)
 
     def active_count(self) -> int:
@@ -115,9 +122,114 @@ class RecorderManager:
         with self._state_lock:
             return len(self._active)
 
+    def _is_recording_running(self, recording: ActiveRecording) -> bool:
+        if recording.artifact_mode != "segment_native":
+            return recording.process.poll() is None
+        streamlink_alive = recording.process.poll() is None
+        if recording.segmenter_process is None:
+            return streamlink_alive
+        segmenter_alive = recording.segmenter_process.poll() is None
+        return streamlink_alive and segmenter_alive
+
+    def _is_recording_finished(self, recording: ActiveRecording) -> bool:
+        if recording.artifact_mode != "segment_native":
+            return recording.process.poll() is not None
+        streamlink_done = recording.process.poll() is not None
+        if recording.segmenter_process is None:
+            return streamlink_done
+        segmenter_done = recording.segmenter_process.poll() is not None
+        return streamlink_done and segmenter_done
+
+    def _resolve_recording_exit_code(self, recording: ActiveRecording) -> int:
+        primary_exit = recording.process.poll()
+        if recording.segmenter_process is None:
+            return primary_exit if primary_exit is not None else recording.process.wait()
+        segmenter_exit = recording.segmenter_process.poll()
+        if primary_exit is None:
+            primary_exit = recording.process.wait()
+        if segmenter_exit is None:
+            segmenter_exit = recording.segmenter_process.wait()
+        if primary_exit not in (None, 0):
+            return primary_exit
+        if segmenter_exit not in (None, 0):
+            return segmenter_exit
+        return primary_exit if primary_exit is not None else 0
+
     def poll(self) -> list[RecordingResult]:
         self._reap_finished_processes()
         return self._drain_completed_results()
+
+    def list_active_recordings(self) -> list[dict[str, object]]:
+        self._reap_finished_processes()
+        with self._state_lock:
+            active_recordings = list(self._active.values())
+
+        snapshots: list[dict[str, object]] = []
+        for recording in active_recordings:
+            if not self._is_recording_running(recording):
+                continue
+
+            source_path = recording.file_path
+            size_bytes = 0
+            modified_at = recording.started_at
+            full_segment_count = 0
+            unknown_ad_confidence = False
+
+            with recording.lock:
+                ad_break_count = self._count_ad_breaks(list(recording.events))
+                if recording.artifact_mode == "segment_native":
+                    unknown_ad_confidence = not recording.playlist_markers_seen
+
+            if recording.artifact_mode == "segment_native" and recording.recording_root is not None:
+                segments_dir = recording.recording_root / "segments"
+                segments = sorted(segments_dir.glob("segment_*.ts"))
+                if segments:
+                    source_path = segments[-1]
+                    full_segment_count = len(segments)
+                    latest_mtime = 0.0
+                    for segment_file in segments:
+                        try:
+                            stat = segment_file.stat()
+                        except OSError:
+                            continue
+                        size_bytes += stat.st_size
+                        latest_mtime = max(latest_mtime, stat.st_mtime)
+                    if latest_mtime > 0:
+                        modified_at = datetime.fromtimestamp(latest_mtime, tz=UTC)
+            else:
+                try:
+                    stat = source_path.stat()
+                    size_bytes = stat.st_size
+                    modified_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+                except OSError:
+                    size_bytes = 0
+
+            snapshots.append(
+                {
+                    "recording_id": recording.recording_id,
+                    "artifact_mode": recording.artifact_mode,
+                    "channel": recording.channel,
+                    "source_path": str(source_path),
+                    "source_available": source_path.exists() and source_path.is_file(),
+                    "source_mode": recording.source_mode,
+                    "full_artifact_path": (
+                        str(recording.full_artifact_path) if recording.full_artifact_path else str(source_path)
+                    ),
+                    "clean_artifact_path": (
+                        str(recording.clean_artifact_path) if recording.clean_artifact_path else None
+                    ),
+                    "full_segment_count": full_segment_count,
+                    "clean_segment_count": 0,
+                    "clean_export_state": "none",
+                    "clean_export_path": None,
+                    "clean_export_error": None,
+                    "ad_break_count": ad_break_count,
+                    "unknown_ad_confidence": unknown_ad_confidence,
+                    "size_bytes": size_bytes,
+                    "modified_at": modified_at,
+                }
+            )
+        return snapshots
 
     def start_recording(self, channel: str) -> str:
         self._reap_finished_processes()
@@ -148,23 +260,72 @@ class RecorderManager:
             metadata_path = output_path.with_suffix(".meta.json")
             full_artifact_path = output_path
 
-        cmd, source_mode = build_streamlink_command(
-            channel=channel,
-            output_path=output_path,
-            preferred_qualities=self.preferred_qualities,
-            twitch_user_oauth_token=self.twitch_user_oauth_token,
-            raw_container=self.recording_raw_container,
-        )
+        segmenter_process: subprocess.Popen | None = None
+        if self.recording_mode == "segment_native":
+            cmd, source_mode = build_streamlink_command(
+                channel=channel,
+                output_path=None,
+                preferred_qualities=self.preferred_qualities,
+                twitch_user_oauth_token=self.twitch_user_oauth_token,
+                raw_container=self.recording_raw_container,
+                output_to_stdout=True,
+            )
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            if process.stdout is None:
+                process.kill()
+                raise OSError("failed to initialize streamlink stdout pipe for segment pipeline")
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
+            segment_pattern = str((recording_root / "segments" / "segment_%06d.ts").resolve())
+            segment_cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                "pipe:0",
+                "-c",
+                "copy",
+                "-f",
+                "segment",
+                "-segment_format",
+                "mpegts",
+                "-segment_time",
+                f"{self.SEGMENT_DURATION_SECONDS}",
+                "-reset_timestamps",
+                "1",
+                segment_pattern,
+            ]
+            segmenter_process = subprocess.Popen(
+                segment_cmd,
+                stdin=process.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            process.stdout.close()
+        else:
+            cmd, source_mode = build_streamlink_command(
+                channel=channel,
+                output_path=output_path,
+                preferred_qualities=self.preferred_qualities,
+                twitch_user_oauth_token=self.twitch_user_oauth_token,
+                raw_container=self.recording_raw_container,
+            )
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
 
         started_at = datetime.now(UTC)
         recording = ActiveRecording(
@@ -172,6 +333,7 @@ class RecorderManager:
             artifact_mode=self.recording_mode,
             channel=channel,
             process=process,
+            segmenter_process=segmenter_process,
             file_path=output_path,
             metadata_path=metadata_path,
             started_at=started_at,
@@ -180,6 +342,8 @@ class RecorderManager:
             full_artifact_path=full_artifact_path,
             clean_artifact_path=clean_artifact_path,
         )
+        if recording.artifact_mode == "segment_native":
+            self._start_playlist_ad_window_tracking(recording)
         self._append_event(recording, "recording_started", at=started_at)
         self._write_metadata(
             recording=recording,
@@ -193,6 +357,7 @@ class RecorderManager:
             clean_export_state="none",
             clean_export_path=None,
             clean_export_error=None,
+            unknown_ad_confidence=False,
             clean_output_path=None,
             clean_output_state="pending",
             clean_output_error=None,
@@ -211,15 +376,27 @@ class RecorderManager:
         if recording is None:
             return None
 
+        self._stop_playlist_ad_window_tracking(recording)
         if recording.process.poll() is None:
             recording.process.terminate()
             try:
-                exit_code = recording.process.wait(timeout=10)
+                recording.process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 recording.process.kill()
-                exit_code = recording.process.wait(timeout=5)
-        else:
-            exit_code = recording.process.wait()
+                recording.process.wait(timeout=5)
+
+        if recording.segmenter_process is not None and recording.segmenter_process.poll() is None:
+            try:
+                recording.segmenter_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                recording.segmenter_process.terminate()
+                try:
+                    recording.segmenter_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    recording.segmenter_process.kill()
+                    recording.segmenter_process.wait(timeout=3)
+
+        exit_code = self._resolve_recording_exit_code(recording)
 
         self._join_stderr_thread(recording)
         processing_result = self._start_recording_finalization(
@@ -265,16 +442,29 @@ class RecorderManager:
             finished_channels = [
                 channel
                 for channel, recording in self._active.items()
-                if recording.process.poll() is not None
+                if self._is_recording_finished(recording)
+            ]
+            broken_segmenter_channels = [
+                channel
+                for channel, recording in self._active.items()
+                if recording.artifact_mode == "segment_native"
+                and recording.segmenter_process is not None
+                and recording.segmenter_process.poll() is not None
+                and recording.process.poll() is None
             ]
             finished_recordings = [
                 self._active.pop(channel)
                 for channel in finished_channels
                 if channel in self._active
             ]
+            for channel in broken_segmenter_channels:
+                recording = self._active.get(channel)
+                if recording is not None and recording.process.poll() is None:
+                    recording.process.terminate()
 
         for recording in finished_recordings:
-            exit_code = recording.process.wait()
+            self._stop_playlist_ad_window_tracking(recording)
+            exit_code = self._resolve_recording_exit_code(recording)
             self._join_stderr_thread(recording)
             processing_result = self._start_recording_finalization(
                 recording=recording,
@@ -314,10 +504,103 @@ class RecorderManager:
         if recording.process.stderr is not None:
             recording.process.stderr.close()
 
+    def _start_playlist_ad_window_tracking(self, recording: ActiveRecording) -> None:
+        recording.playlist_stop_event.clear()
+        thread = threading.Thread(
+            target=self._poll_playlist_ad_windows,
+            args=(recording,),
+            daemon=True,
+            name=f"playlist-ad-tracker-{recording.channel}",
+        )
+        recording.playlist_thread = thread
+        thread.start()
+
+    def _stop_playlist_ad_window_tracking(self, recording: ActiveRecording) -> None:
+        recording.playlist_stop_event.set()
+        if recording.playlist_thread is not None:
+            recording.playlist_thread.join(timeout=2)
+
+    def _poll_playlist_ad_windows(self, recording: ActiveRecording) -> None:
+        playlist_url = self._resolve_stream_playlist_url(recording.channel)
+        with recording.lock:
+            recording.playlist_url = playlist_url
+            if not playlist_url:
+                recording.playlist_poll_error = "failed to resolve stream playlist url"
+
+        if not playlist_url:
+            return
+
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            while not recording.playlist_stop_event.is_set():
+                try:
+                    response = client.get(playlist_url)
+                    response.raise_for_status()
+                    windows, markers_seen = parse_twitch_daterange_ad_windows(response.text)
+                    with recording.lock:
+                        if markers_seen:
+                            recording.playlist_markers_seen = True
+                        if windows:
+                            recording.playlist_ad_windows = self._merge_datetime_windows(
+                                recording.playlist_ad_windows + windows
+                            )
+                        recording.playlist_poll_error = None
+                except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                    with recording.lock:
+                        recording.playlist_poll_error = str(exc) or "playlist poll failed"
+                recording.playlist_stop_event.wait(self.PLAYLIST_POLL_INTERVAL_SECONDS)
+
+    def _resolve_stream_playlist_url(self, channel: str) -> str | None:
+        cmd, _source_mode = build_streamlink_stream_url_command(
+            channel=channel,
+            preferred_qualities=self.preferred_qualities,
+            twitch_user_oauth_token=self.twitch_user_oauth_token,
+        )
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        stream_url = result.stdout.strip().splitlines()
+        if not stream_url:
+            return None
+        candidate = stream_url[0].strip()
+        return candidate or None
+
+    def _merge_datetime_windows(
+        self,
+        windows: list[tuple[datetime, datetime]],
+    ) -> list[tuple[datetime, datetime]]:
+        merged: list[tuple[datetime, datetime]] = []
+        for start, end in sorted(windows, key=lambda item: item[0]):
+            if end <= start:
+                continue
+            if not merged:
+                merged.append((start, end))
+                continue
+            prev_start, prev_end = merged[-1]
+            if start <= prev_end:
+                merged[-1] = (prev_start, max(prev_end, end))
+            else:
+                merged.append((start, end))
+        return merged
+
     def _consume_stderr(self, recording: ActiveRecording) -> None:
         assert recording.process.stderr is not None
         for raw_line in recording.process.stderr:
-            line = raw_line.strip()
+            if isinstance(raw_line, bytes):
+                line = raw_line.decode("utf-8", errors="replace").strip()
+            else:
+                line = raw_line.strip()
             if not line:
                 continue
             with recording.lock:
@@ -391,6 +674,7 @@ class RecorderManager:
             clean_export_state=processing_result.clean_export_state,
             clean_export_path=processing_result.clean_export_path,
             clean_export_error=processing_result.clean_export_error,
+            unknown_ad_confidence=processing_result.unknown_ad_confidence,
             clean_output_path=processing_result.clean_output_path,
             clean_output_state=processing_result.clean_output_state,
             clean_output_error=processing_result.clean_output_error,
@@ -441,6 +725,7 @@ class RecorderManager:
                     clean_export_state=processing_result.clean_export_state,
                     clean_export_path=processing_result.clean_export_path,
                     clean_export_error=processing_result.clean_export_error,
+                    unknown_ad_confidence=processing_result.unknown_ad_confidence,
                     clean_output_path=None,
                     clean_output_state="failed",
                     clean_output_error=error_message,
@@ -458,6 +743,7 @@ class RecorderManager:
                     clean_export_state=processing_result.clean_export_state,
                     clean_export_path=processing_result.clean_export_path,
                     clean_export_error=processing_result.clean_export_error,
+                    unknown_ad_confidence=processing_result.unknown_ad_confidence,
                     clean_output_path=None,
                     clean_output_state="failed",
                     clean_output_error=error_message,
@@ -559,6 +845,7 @@ class RecorderManager:
             clean_export_state="none",
             clean_export_path=None,
             clean_export_error=None,
+            unknown_ad_confidence=False,
             clean_output_path=None,
             clean_output_state="processing",
             clean_output_error=None,
@@ -588,12 +875,14 @@ class RecorderManager:
         clean_export_state = "none"
         clean_export_path: str | None = None
         clean_export_error: str | None = None
+        unknown_ad_confidence = False
         if self.recording_mode == "segment_native":
             (
                 full_artifact_path,
                 clean_artifact_path,
                 full_segment_count,
                 clean_segment_count,
+                unknown_ad_confidence,
                 clean_output_state,
                 clean_output_error,
                 resolved_ad_break_count,
@@ -607,9 +896,14 @@ class RecorderManager:
             source_available = recording.file_path.exists()
             source_deleted_on_success = False
             source_delete_error = None
+            ad_detection_sources = (
+                ["playlist_daterange"]
+                if not unknown_ad_confidence
+                else ["playlist_daterange_missing"]
+            )
             self._set_last_watchable_context(
                 watchable_strategy="segment_native_manifest",
-                ad_detection_sources=self._infer_ad_detection_sources_from_events(events_snapshot),
+                ad_detection_sources=ad_detection_sources,
                 prepare_mitigation=self._base_prepare_mitigation(),
             )
         else:
@@ -647,6 +941,7 @@ class RecorderManager:
             clean_export_state=clean_export_state,
             clean_export_path=clean_export_path,
             clean_export_error=clean_export_error,
+            unknown_ad_confidence=unknown_ad_confidence,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
             clean_output_error=clean_output_error,
@@ -677,6 +972,7 @@ class RecorderManager:
             clean_export_state=clean_export_state,
             clean_export_path=clean_export_path,
             clean_export_error=clean_export_error,
+            unknown_ad_confidence=unknown_ad_confidence,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
             clean_output_error=clean_output_error,
@@ -693,66 +989,96 @@ class RecorderManager:
         started_at: datetime,
         ended_at: datetime,
         events: list[RecordingEvent],
-    ) -> tuple[Path, Path, int, int, str, str | None, int]:
+    ) -> tuple[Path, Path, int, int, bool, str, str | None, int]:
         if recording.recording_root is None:
             raise RuntimeError("segment-native recording root is missing")
         if recording.full_artifact_path is None or recording.clean_artifact_path is None:
             raise RuntimeError("segment-native manifest path is missing")
-        if not recording.file_path.exists():
+        segments_dir = recording.recording_root / "segments"
+        segment_files = sorted(segments_dir.glob("segment_*.ts"))
+        if not segment_files and recording.file_path.exists():
+            segment_files = [recording.file_path]
+
+        if not segment_files:
             return (
                 recording.full_artifact_path,
                 recording.clean_artifact_path,
                 0,
                 0,
+                True,
                 "failed",
-                "source recording file does not exist",
+                "no segment files were produced",
                 0,
             )
 
-        duration_seconds = self._probe_media_duration(recording.file_path)
-        if duration_seconds is None or duration_seconds <= 0:
-            duration_seconds = max(0.0, (ended_at - started_at).total_seconds())
-        if duration_seconds <= 0:
+        segment_offsets: list[tuple[Path, float, float, float]] = []
+        cursor = 0.0
+        for segment_file in segment_files:
+            duration_seconds = self._probe_media_duration(segment_file)
+            if duration_seconds is None or duration_seconds <= 0:
+                duration_seconds = self.SEGMENT_DURATION_SECONDS
+            segment_offsets.append(
+                (segment_file, duration_seconds, cursor, cursor + duration_seconds)
+            )
+            cursor += duration_seconds
+
+        total_duration = cursor
+        if total_duration <= 0:
             return (
                 recording.full_artifact_path,
                 recording.clean_artifact_path,
                 0,
                 0,
+                True,
                 "failed",
                 "recording duration too short to build segment manifests",
                 0,
             )
 
-        ad_windows = self._collect_ad_windows(events, ended_at=ended_at)
+        with recording.lock:
+            daterange_ad_windows = list(recording.playlist_ad_windows)
+            has_daterange_markers = bool(recording.playlist_markers_seen)
+
+        unknown_ad_confidence = not has_daterange_markers
         ad_ranges = self._merge_offset_ranges(
             [
                 (
                     max(0.0, (ad_start - started_at).total_seconds() - self.segment_ad_padding_seconds),
-                    min(duration_seconds, (ad_end - started_at).total_seconds() + self.segment_ad_padding_seconds),
+                    min(total_duration, (ad_end - started_at).total_seconds() + self.segment_ad_padding_seconds),
                 )
-                for ad_start, ad_end in ad_windows
+                for ad_start, ad_end in daterange_ad_windows
                 if ad_end > ad_start
             ]
-        )
+        ) if has_daterange_markers else []
 
-        relative_segment_path = str(
-            Path("../segments") / recording.file_path.name
-        )
-        segment_range = (0.0, duration_seconds)
-        is_ad = any(self._ranges_intersect(segment_range, ad_range) for ad_range in ad_ranges)
-        segment_index_payload = [
-            {
-                "seq": 0,
-                "start_ts": started_at.isoformat(),
-                "duration": round(duration_seconds, 3),
-                "is_ad": is_ad,
-                "file_path": relative_segment_path,
-            }
-        ]
+        segment_index_payload: list[dict[str, object]] = []
+        for seq, (segment_file, duration_seconds, start_offset, end_offset) in enumerate(segment_offsets):
+            relative_segment_path = str(Path("../segments") / segment_file.name)
+            segment_range = (start_offset, end_offset)
+            is_ad = (
+                has_daterange_markers
+                and any(self._ranges_intersect(segment_range, ad_range) for ad_range in ad_ranges)
+            )
+            segment_index_payload.append(
+                {
+                    "seq": seq,
+                    "start_ts": (started_at + timedelta(seconds=start_offset)).isoformat(),
+                    "duration": round(duration_seconds, 3),
+                    "is_ad": is_ad,
+                    "file_path": relative_segment_path,
+                }
+            )
 
         segment_index_path = recording.recording_root / "segment_index.json"
         segment_index_path.write_text(
-            json.dumps(segment_index_payload, indent=2),
+            json.dumps(
+                {
+                    "recording_id": recording.recording_id,
+                    "unknown_ad_confidence": unknown_ad_confidence,
+                    "segments": segment_index_payload,
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
 
@@ -760,19 +1086,25 @@ class RecorderManager:
             manifest_path=recording.full_artifact_path,
             segments=segment_index_payload,
         )
-        clean_segments = [segment for segment in segment_index_payload if not segment["is_ad"]]
+        clean_segments = (
+            [segment for segment in segment_index_payload if not segment["is_ad"]]
+            if has_daterange_markers
+            else list(segment_index_payload)
+        )
         self._write_hls_manifest(
             manifest_path=recording.clean_artifact_path,
             segments=clean_segments,
         )
+        ad_break_count = len(daterange_ad_windows) if has_daterange_markers else 0
         return (
             recording.full_artifact_path,
             recording.clean_artifact_path,
             len(segment_index_payload),
             len(clean_segments),
+            unknown_ad_confidence,
             "ready",
             None,
-            len(ad_windows),
+            ad_break_count,
         )
 
     def _write_hls_manifest(
@@ -891,6 +1223,7 @@ class RecorderManager:
         clean_export_state: str,
         clean_export_path: str | None,
         clean_export_error: str | None,
+        unknown_ad_confidence: bool,
         clean_output_path: str | None,
         clean_output_state: str,
         clean_output_error: str | None,
@@ -915,6 +1248,7 @@ class RecorderManager:
             clean_export_state=clean_export_state,
             clean_export_path=clean_export_path,
             clean_export_error=clean_export_error,
+            unknown_ad_confidence=unknown_ad_confidence,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
             clean_output_error=clean_output_error,

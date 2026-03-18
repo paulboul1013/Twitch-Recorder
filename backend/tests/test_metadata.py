@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from app.recorder import RecorderManager
+from app.recording_types import ActiveRecording
 from conftest import FakeProcess, _load_metadata
 
 def test_stop_recording_metadata_includes_streamlink_diagnostics(tmp_path: Path) -> None:
@@ -255,3 +257,141 @@ def test_raw_delete_failure_records_error_without_overriding_watchable_ready(tmp
     assert metadata["source_available"] is True
     assert metadata["source_deleted_on_success"] is False
     assert "permission denied" in metadata["source_delete_error"]
+
+
+def test_segment_native_artifacts_use_daterange_windows_for_clean_manifest(tmp_path: Path) -> None:
+    recorder = RecorderManager(
+        tmp_path,
+        ("best",),
+        recording_mode="segment_native",
+        segment_ad_padding_seconds=2.0,
+    )
+    recording_root = tmp_path / "alpha_20260318_120000_000001"
+    segments_dir = recording_root / "segments"
+    manifests_dir = recording_root / "manifests"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+
+    segment_0 = segments_dir / "segment_000000.ts"
+    segment_1 = segments_dir / "segment_000001.ts"
+    segment_0.write_bytes(b"a")
+    segment_1.write_bytes(b"b")
+
+    started_at = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
+    recording = ActiveRecording(
+        recording_id="rec-1",
+        artifact_mode="segment_native",
+        channel="alpha",
+        process=FakeProcess(),
+        segmenter_process=FakeProcess(),
+        file_path=segment_0,
+        metadata_path=recording_root / "recording.meta.json",
+        started_at=started_at,
+        source_mode="unauthenticated",
+        recording_root=recording_root,
+        full_artifact_path=manifests_dir / "full.m3u8",
+        clean_artifact_path=manifests_dir / "clean.m3u8",
+    )
+    recording.playlist_markers_seen = True
+    recording.playlist_ad_windows = [
+        (
+            started_at + timedelta(seconds=8),
+            started_at + timedelta(seconds=12),
+        )
+    ]
+
+    with patch.object(
+        RecorderManager,
+        "_probe_media_duration",
+        side_effect=[10.0, 10.0],
+    ):
+        (
+            _full_path,
+            _clean_path,
+            full_segment_count,
+            clean_segment_count,
+            unknown_ad_confidence,
+            clean_output_state,
+            _clean_output_error,
+            ad_break_count,
+        ) = recorder._build_segment_native_artifacts(
+            recording=recording,
+            started_at=started_at,
+            ended_at=started_at + timedelta(seconds=20),
+            events=[],
+        )
+
+    assert full_segment_count == 2
+    assert clean_segment_count == 0
+    assert unknown_ad_confidence is False
+    assert clean_output_state == "ready"
+    assert ad_break_count == 1
+
+    segment_index = _load_metadata(recording_root / "segment_index.json")
+    assert segment_index["unknown_ad_confidence"] is False
+    assert [segment["is_ad"] for segment in segment_index["segments"]] == [True, True]
+
+
+def test_segment_native_without_daterange_keeps_all_segments_and_marks_unknown_confidence(
+    tmp_path: Path,
+) -> None:
+    recorder = RecorderManager(
+        tmp_path,
+        ("best",),
+        recording_mode="segment_native",
+    )
+    recording_root = tmp_path / "alpha_20260318_120000_000002"
+    segments_dir = recording_root / "segments"
+    manifests_dir = recording_root / "manifests"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+
+    segment_0 = segments_dir / "segment_000000.ts"
+    segment_1 = segments_dir / "segment_000001.ts"
+    segment_0.write_bytes(b"a")
+    segment_1.write_bytes(b"b")
+
+    started_at = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
+    recording = ActiveRecording(
+        recording_id="rec-2",
+        artifact_mode="segment_native",
+        channel="alpha",
+        process=FakeProcess(),
+        segmenter_process=FakeProcess(),
+        file_path=segment_0,
+        metadata_path=recording_root / "recording.meta.json",
+        started_at=started_at,
+        source_mode="unauthenticated",
+        recording_root=recording_root,
+        full_artifact_path=manifests_dir / "full.m3u8",
+        clean_artifact_path=manifests_dir / "clean.m3u8",
+    )
+    recording.playlist_markers_seen = False
+    recording.playlist_ad_windows = []
+
+    with patch.object(
+        RecorderManager,
+        "_probe_media_duration",
+        side_effect=[10.0, 10.0],
+    ):
+        (
+            _full_path,
+            _clean_path,
+            full_segment_count,
+            clean_segment_count,
+            unknown_ad_confidence,
+            clean_output_state,
+            _clean_output_error,
+            ad_break_count,
+        ) = recorder._build_segment_native_artifacts(
+            recording=recording,
+            started_at=started_at,
+            ended_at=started_at + timedelta(seconds=20),
+            events=[],
+        )
+
+    assert full_segment_count == 2
+    assert clean_segment_count == 2
+    assert unknown_ad_confidence is True
+    assert clean_output_state == "ready"
+    assert ad_break_count == 0

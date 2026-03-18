@@ -36,6 +36,7 @@ class StreamStatus(BaseModel):
 class RecordingInfo(BaseModel):
     recording_id: str
     artifact_mode: str = "legacy"
+    is_recording: bool = False
     channel: str
     file_path: str
     file_name: str
@@ -55,6 +56,7 @@ class RecordingInfo(BaseModel):
     clean_export_state: str = "none"
     clean_export_path: str | None = None
     clean_export_error: str | None = None
+    unknown_ad_confidence: bool = False
     size_bytes: int
     modified_at: datetime
 

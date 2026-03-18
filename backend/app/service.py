@@ -130,6 +130,7 @@ class MonitorService:
                 clean_export_state=result.clean_export_state,
                 clean_export_path=result.clean_export_path,
                 clean_export_error=result.clean_export_error,
+                unknown_ad_confidence=result.unknown_ad_confidence,
             )
         )
 
@@ -389,7 +390,7 @@ class MonitorService:
             )
 
         existing_files.sort(key=lambda item: item[0], reverse=True)
-        recordings: list[RecordingInfo] = []
+        recordings_by_id: dict[str, RecordingInfo] = {}
         for (
             modified_ts,
             size_bytes,
@@ -401,10 +402,11 @@ class MonitorService:
             watchable_state,
         ) in existing_files:
             source_path = Path(tracked.source_file_path)
-            recordings.append(
+            recordings_by_id[tracked.recording_id] = (
                 RecordingInfo(
                     recording_id=tracked.recording_id,
                     artifact_mode=tracked.artifact_mode,
+                    is_recording=False,
                     channel=tracked.channel,
                     file_path=str(source_path),
                     file_name=source_path.name,
@@ -428,11 +430,114 @@ class MonitorService:
                     clean_export_state=tracked.clean_export_state,
                     clean_export_path=tracked.clean_export_path,
                     clean_export_error=tracked.clean_export_error,
+                    unknown_ad_confidence=tracked.unknown_ad_confidence,
                     size_bytes=size_bytes,
                     modified_at=datetime.fromtimestamp(modified_ts, tz=UTC),
                 )
             )
-        return recordings
+
+        async with self._recorder_lock:
+            active_snapshots = self.recorder.list_active_recordings()
+
+        for snapshot in active_snapshots:
+            recording_id = str(snapshot.get("recording_id", "")).strip()
+            source_path_value = str(snapshot.get("source_path", "")).strip()
+            if not (recording_id and source_path_value):
+                continue
+
+            source_path = Path(source_path_value)
+            channel = str(snapshot.get("channel", "")).strip().lower()
+            if not channel:
+                channel = recording_id
+
+            modified_at_raw = snapshot.get("modified_at")
+            if isinstance(modified_at_raw, datetime):
+                modified_at = modified_at_raw
+            else:
+                modified_at = datetime.now(UTC)
+            if modified_at.tzinfo is None:
+                modified_at = modified_at.replace(tzinfo=UTC)
+
+            artifact_mode = str(snapshot.get("artifact_mode", "legacy")).strip().lower()
+            if artifact_mode not in {"legacy", "segment_native"}:
+                artifact_mode = "legacy"
+
+            try:
+                size_bytes = max(0, int(snapshot.get("size_bytes", 0)))
+            except (TypeError, ValueError):
+                size_bytes = 0
+
+            source_available = bool(
+                snapshot.get(
+                    "source_available",
+                    source_path.exists() and source_path.is_file(),
+                )
+            )
+            source_mode = str(snapshot.get("source_mode", "unauthenticated")).strip() or "unauthenticated"
+            full_artifact_path = str(snapshot.get("full_artifact_path", "")).strip() or None
+            clean_artifact_path = str(snapshot.get("clean_artifact_path", "")).strip() or None
+
+            try:
+                full_segment_count = max(0, int(snapshot.get("full_segment_count", 0)))
+            except (TypeError, ValueError):
+                full_segment_count = 0
+            try:
+                clean_segment_count = max(0, int(snapshot.get("clean_segment_count", 0)))
+            except (TypeError, ValueError):
+                clean_segment_count = 0
+
+            clean_export_state = str(snapshot.get("clean_export_state", "none")).strip().lower() or "none"
+            if clean_export_state not in {"none", "queued", "processing", "ready", "failed"}:
+                clean_export_state = "none"
+            clean_export_path = str(snapshot.get("clean_export_path", "")).strip() or None
+            clean_export_error = str(snapshot.get("clean_export_error", "")).strip() or None
+
+            try:
+                ad_break_count = max(0, int(snapshot.get("ad_break_count", 0)))
+            except (TypeError, ValueError):
+                ad_break_count = 0
+
+            unknown_ad_confidence = bool(snapshot.get("unknown_ad_confidence", False))
+
+            watchable_file_path = None
+            watchable_file_name = None
+            watchable_available = False
+            if clean_artifact_path:
+                clean_artifact_candidate = Path(clean_artifact_path)
+                if clean_artifact_candidate.exists() and clean_artifact_candidate.is_file():
+                    watchable_file_path = str(clean_artifact_candidate)
+                    watchable_file_name = clean_artifact_candidate.name
+                    watchable_available = True
+
+            recordings_by_id[recording_id] = RecordingInfo(
+                recording_id=recording_id,
+                artifact_mode=artifact_mode,
+                is_recording=True,
+                channel=channel,
+                file_path=str(source_path),
+                file_name=source_path.name,
+                source_file_path=str(source_path),
+                source_file_name=source_path.name,
+                source_available=source_available,
+                watchable_file_path=watchable_file_path,
+                watchable_file_name=watchable_file_name,
+                watchable_available=watchable_available,
+                watchable_state="processing",
+                ad_break_count=ad_break_count,
+                source_mode=source_mode,
+                full_artifact_path=full_artifact_path,
+                clean_artifact_path=clean_artifact_path,
+                full_segment_count=full_segment_count,
+                clean_segment_count=clean_segment_count,
+                clean_export_state=clean_export_state,
+                clean_export_path=clean_export_path,
+                clean_export_error=clean_export_error,
+                unknown_ad_confidence=unknown_ad_confidence,
+                size_bytes=size_bytes,
+                modified_at=modified_at,
+            )
+
+        return sorted(recordings_by_id.values(), key=lambda item: item.modified_at, reverse=True)
 
     def _find_recording_by_id(self, recording_id: str) -> TrackedRecording | None:
         for tracked in self.recording_store.load():

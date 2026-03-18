@@ -28,7 +28,8 @@ class ActiveRecording:
     recording_id: str
     artifact_mode: str
     channel: str
-    process: subprocess.Popen[str]
+    process: subprocess.Popen
+    segmenter_process: subprocess.Popen | None
     file_path: Path
     metadata_path: Path
     started_at: datetime
@@ -36,6 +37,12 @@ class ActiveRecording:
     recording_root: Path | None = None
     full_artifact_path: Path | None = None
     clean_artifact_path: Path | None = None
+    playlist_url: str | None = None
+    playlist_markers_seen: bool = False
+    playlist_ad_windows: list[tuple[datetime, datetime]] = field(default_factory=list)
+    playlist_poll_error: str | None = None
+    playlist_thread: threading.Thread | None = None
+    playlist_stop_event: threading.Event = field(default_factory=threading.Event)
     events: list[RecordingEvent] = field(default_factory=list)
     stderr_tail: list[str] = field(default_factory=list)
     ad_break_active: bool = False
@@ -62,6 +69,7 @@ class RecordingResult:
     clean_export_state: str
     clean_export_path: str | None
     clean_export_error: str | None
+    unknown_ad_confidence: bool
     clean_output_path: str | None
     clean_output_state: str
     clean_output_error: str | None

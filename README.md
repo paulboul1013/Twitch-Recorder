@@ -130,7 +130,7 @@ docker compose up -d --build
 
 所有錄影資料都會存在專案根目錄對應的資料夾：
 
-- `recordings/<recording_id>/segments/segment_000000.ts`：原始錄影 segment（目前實作為單段，後續可擴成多段）
+- `recordings/<recording_id>/segments/segment_000000.ts`、`segment_000001.ts` ...：錄製中持續切段的原始 segment
 - `recordings/<recording_id>/manifests/full.m3u8`：完整 full manifest
 - `recordings/<recording_id>/manifests/clean.m3u8`：依廣告規則排除後的 clean manifest
 - `recordings/<recording_id>/exports/clean.mp4`：按需匯出的 clean mp4
