@@ -3,6 +3,7 @@ services:
     build:
       context: ./backend
     container_name: twitch-recorder-backend
+    user: "${UID:-1000}:${GID:-1000}"
     env_file:
       - .env
     expose:
