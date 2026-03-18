@@ -1182,6 +1182,8 @@ class RecorderManager:
                 str(clean_manifest_path),
                 "-c",
                 "copy",
+                "-f",
+                "mpegts",
                 str(tmp_path),
             ]
             result = subprocess.run(

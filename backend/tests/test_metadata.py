@@ -460,6 +460,9 @@ def test_segment_native_finalize_compacts_clean_manifest_and_deletes_segments(tm
         stderr = ""
 
     def fake_run(cmd, stdout=None, stderr=None, text=None, encoding=None, errors=None, check=None):
+        assert "-f" in cmd
+        format_index = cmd.index("-f")
+        assert cmd[format_index + 1] == "mpegts"
         Path(cmd[-1]).write_bytes(b"clean-ts")
         return FakeCompletedProcess()
 
