@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import subprocess
 import threading
 import time
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -357,6 +359,9 @@ class RecorderManager:
             clean_export_state="none",
             clean_export_path=None,
             clean_export_error=None,
+            clean_compact_state="none",
+            clean_compact_path=None,
+            clean_compact_error=None,
             unknown_ad_confidence=False,
             clean_output_path=None,
             clean_output_state="pending",
@@ -674,6 +679,9 @@ class RecorderManager:
             clean_export_state=processing_result.clean_export_state,
             clean_export_path=processing_result.clean_export_path,
             clean_export_error=processing_result.clean_export_error,
+            clean_compact_state=processing_result.clean_compact_state,
+            clean_compact_path=processing_result.clean_compact_path,
+            clean_compact_error=processing_result.clean_compact_error,
             unknown_ad_confidence=processing_result.unknown_ad_confidence,
             clean_output_path=processing_result.clean_output_path,
             clean_output_state=processing_result.clean_output_state,
@@ -725,6 +733,9 @@ class RecorderManager:
                     clean_export_state=processing_result.clean_export_state,
                     clean_export_path=processing_result.clean_export_path,
                     clean_export_error=processing_result.clean_export_error,
+                    clean_compact_state="failed",
+                    clean_compact_path=None,
+                    clean_compact_error=error_message,
                     unknown_ad_confidence=processing_result.unknown_ad_confidence,
                     clean_output_path=None,
                     clean_output_state="failed",
@@ -743,6 +754,9 @@ class RecorderManager:
                     clean_export_state=processing_result.clean_export_state,
                     clean_export_path=processing_result.clean_export_path,
                     clean_export_error=processing_result.clean_export_error,
+                    clean_compact_state="failed",
+                    clean_compact_path=None,
+                    clean_compact_error=error_message,
                     unknown_ad_confidence=processing_result.unknown_ad_confidence,
                     clean_output_path=None,
                     clean_output_state="failed",
@@ -827,6 +841,11 @@ class RecorderManager:
         ad_break_count = self._count_ad_breaks(events_snapshot)
         full_artifact_path = recording.full_artifact_path or recording.file_path
         clean_artifact_path = recording.clean_artifact_path
+        clean_compact_path = (
+            str(recording.recording_root / "exports" / "clean.ts")
+            if recording.artifact_mode == "segment_native" and recording.recording_root is not None
+            else None
+        )
         return RecordingResult(
             recording_id=recording.recording_id,
             artifact_mode=recording.artifact_mode,
@@ -845,6 +864,9 @@ class RecorderManager:
             clean_export_state="none",
             clean_export_path=None,
             clean_export_error=None,
+            clean_compact_state="processing" if recording.artifact_mode == "segment_native" else "none",
+            clean_compact_path=clean_compact_path,
+            clean_compact_error=None,
             unknown_ad_confidence=False,
             clean_output_path=None,
             clean_output_state="processing",
@@ -875,6 +897,9 @@ class RecorderManager:
         clean_export_state = "none"
         clean_export_path: str | None = None
         clean_export_error: str | None = None
+        clean_compact_state = "none"
+        clean_compact_path: str | None = None
+        clean_compact_error: str | None = None
         unknown_ad_confidence = False
         if self.recording_mode == "segment_native":
             (
@@ -896,6 +921,14 @@ class RecorderManager:
             source_available = recording.file_path.exists()
             source_deleted_on_success = False
             source_delete_error = None
+            if clean_output_state == "ready":
+                clean_compact_state, clean_compact_path, clean_compact_error = self._compact_segment_native_output(
+                    recording=recording,
+                )
+            else:
+                clean_compact_state = "failed"
+                clean_compact_path = None
+                clean_compact_error = clean_output_error
             ad_detection_sources = (
                 ["playlist_daterange"]
                 if not unknown_ad_confidence
@@ -941,6 +974,9 @@ class RecorderManager:
             clean_export_state=clean_export_state,
             clean_export_path=clean_export_path,
             clean_export_error=clean_export_error,
+            clean_compact_state=clean_compact_state,
+            clean_compact_path=clean_compact_path,
+            clean_compact_error=clean_compact_error,
             unknown_ad_confidence=unknown_ad_confidence,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
@@ -972,6 +1008,9 @@ class RecorderManager:
             clean_export_state=clean_export_state,
             clean_export_path=clean_export_path,
             clean_export_error=clean_export_error,
+            clean_compact_state=clean_compact_state,
+            clean_compact_path=clean_compact_path,
+            clean_compact_error=clean_compact_error,
             unknown_ad_confidence=unknown_ad_confidence,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,
@@ -1107,6 +1146,79 @@ class RecorderManager:
             ad_break_count,
         )
 
+    def _compact_segment_native_output(
+        self,
+        *,
+        recording: ActiveRecording,
+    ) -> tuple[str, str | None, str | None]:
+        if recording.recording_root is None or recording.clean_artifact_path is None:
+            return "failed", None, "segment-native manifest path is missing"
+
+        clean_manifest_path = recording.clean_artifact_path
+        if not clean_manifest_path.exists():
+            return "failed", None, "clean manifest not found"
+
+        compact_output_path = recording.recording_root / "exports" / "clean.ts"
+        compact_output_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{compact_output_path.name}.",
+            suffix=".tmp",
+            dir=str(compact_output_path.parent),
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-allowed_extensions",
+                "ALL",
+                "-protocol_whitelist",
+                "file,crypto,data",
+                "-i",
+                str(clean_manifest_path),
+                "-c",
+                "copy",
+                str(tmp_path),
+            ]
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if result.returncode != 0:
+                error_text = (result.stderr or result.stdout or "").strip()
+                if len(error_text) > 500:
+                    error_text = error_text[-500:]
+                return "failed", None, error_text or "clean ts compaction failed"
+
+            if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+                return "failed", None, "clean ts compaction produced no output"
+
+            os.replace(tmp_path, compact_output_path)
+            delete_error = self._delete_segment_native_segments(recording.recording_root)
+            return "ready", str(compact_output_path), delete_error
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            return "failed", None, str(exc) or "clean ts compaction failed"
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def _delete_segment_native_segments(self, recording_root: Path) -> str | None:
+        segments_dir = recording_root / "segments"
+        try:
+            for segment_file in sorted(segments_dir.glob("segment_*.ts")):
+                segment_file.unlink(missing_ok=True)
+        except OSError as exc:
+            return str(exc) or "failed to delete segment files"
+        return None
+
     def _write_hls_manifest(
         self,
         *,
@@ -1223,6 +1335,9 @@ class RecorderManager:
         clean_export_state: str,
         clean_export_path: str | None,
         clean_export_error: str | None,
+        clean_compact_state: str,
+        clean_compact_path: str | None,
+        clean_compact_error: str | None,
         unknown_ad_confidence: bool,
         clean_output_path: str | None,
         clean_output_state: str,
@@ -1248,6 +1363,9 @@ class RecorderManager:
             clean_export_state=clean_export_state,
             clean_export_path=clean_export_path,
             clean_export_error=clean_export_error,
+            clean_compact_state=clean_compact_state,
+            clean_compact_path=clean_compact_path,
+            clean_compact_error=clean_compact_error,
             unknown_ad_confidence=unknown_ad_confidence,
             clean_output_path=clean_output_path,
             clean_output_state=clean_output_state,

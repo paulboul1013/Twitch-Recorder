@@ -11,6 +11,12 @@ class RecordingMetadataWriter:
     def __init__(self, *, recording_start_delay_seconds: int) -> None:
         self.recording_start_delay_seconds = max(0, int(recording_start_delay_seconds))
 
+    @staticmethod
+    def _stringify_path(value: str | None) -> str | None:
+        if value is None:
+            return None
+        return str(value)
+
     def base_prepare_mitigation(self) -> list[str]:
         if self.recording_start_delay_seconds > 0:
             return ["start_delay"]
@@ -30,6 +36,9 @@ class RecordingMetadataWriter:
         clean_export_state: str,
         clean_export_path: str | None,
         clean_export_error: str | None,
+        clean_compact_state: str,
+        clean_compact_path: str | None,
+        clean_compact_error: str | None,
         unknown_ad_confidence: bool,
         clean_output_path: str | None,
         clean_output_state: str,
@@ -70,15 +79,18 @@ class RecordingMetadataWriter:
             "state": state,
             "events": events_payload,
             "streamlink_stderr_tail": stderr_tail,
-            "full_artifact_path": full_artifact_path,
-            "clean_artifact_path": clean_artifact_path,
+            "full_artifact_path": self._stringify_path(full_artifact_path),
+            "clean_artifact_path": self._stringify_path(clean_artifact_path),
             "full_segment_count": max(0, int(full_segment_count)),
             "clean_segment_count": max(0, int(clean_segment_count)),
             "clean_export_state": clean_export_state,
-            "clean_export_path": clean_export_path,
+            "clean_export_path": self._stringify_path(clean_export_path),
             "clean_export_error": clean_export_error,
+            "clean_compact_state": clean_compact_state,
+            "clean_compact_path": self._stringify_path(clean_compact_path),
+            "clean_compact_error": clean_compact_error,
             "unknown_ad_confidence": bool(unknown_ad_confidence),
-            "clean_output_path": clean_output_path,
+            "clean_output_path": self._stringify_path(clean_output_path),
             "clean_output_state": clean_output_state,
             "clean_output_error": clean_output_error,
             "watchable_processing_seconds": watchable_processing_seconds,

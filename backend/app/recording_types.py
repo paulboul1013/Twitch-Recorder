@@ -69,6 +69,9 @@ class RecordingResult:
     clean_export_state: str
     clean_export_path: str | None
     clean_export_error: str | None
+    clean_compact_state: str
+    clean_compact_path: str | None
+    clean_compact_error: str | None
     unknown_ad_confidence: bool
     clean_output_path: str | None
     clean_output_state: str

@@ -94,6 +94,9 @@ def test_metadata_pending_state_has_new_watchable_fields(tmp_path: Path) -> None
     assert metadata["source_available"] is True
     assert metadata["source_deleted_on_success"] is False
     assert metadata["source_delete_error"] is None
+    assert metadata["clean_compact_state"] == "none"
+    assert metadata["clean_compact_path"] is None
+    assert metadata["clean_compact_error"] is None
 
 
 def test_metadata_ready_state_includes_strategy_and_detection_sources(tmp_path: Path) -> None:
@@ -125,6 +128,9 @@ def test_metadata_ready_state_includes_strategy_and_detection_sources(tmp_path: 
     assert metadata["watchable_strategy"] == "remux"
     assert metadata["ad_detection_sources"] == []
     assert metadata["prepare_mitigation"] == ["start_delay"]
+    assert metadata["clean_compact_state"] == "none"
+    assert metadata["clean_compact_path"] is None
+    assert metadata["clean_compact_error"] is None
 
 
 def test_metadata_failed_state_includes_strategy_and_sources(tmp_path: Path) -> None:
@@ -161,6 +167,9 @@ def test_metadata_failed_state_includes_strategy_and_sources(tmp_path: Path) -> 
     assert metadata["watchable_strategy"] == "fallback_reencode"
     assert metadata["ad_detection_sources"] == ["stderr"]
     assert metadata["prepare_mitigation"] == ["start_delay", "reencode_fallback"]
+    assert metadata["clean_compact_state"] == "none"
+    assert metadata["clean_compact_path"] is None
+    assert metadata["clean_compact_error"] is None
 
 
 def test_raw_source_is_deleted_after_successful_watchable_finalize(tmp_path: Path) -> None:
@@ -395,3 +404,168 @@ def test_segment_native_without_daterange_keeps_all_segments_and_marks_unknown_c
     assert unknown_ad_confidence is True
     assert clean_output_state == "ready"
     assert ad_break_count == 0
+
+
+def _build_segment_native_finalize_fixture(
+    tmp_path: Path,
+    *,
+    recording_id: str,
+    markers_seen: bool = True,
+) -> tuple[RecorderManager, ActiveRecording, Path, Path, Path, datetime]:
+    recorder = RecorderManager(
+        tmp_path,
+        ("best",),
+        recording_mode="segment_native",
+    )
+    recording_root = tmp_path / recording_id
+    segments_dir = recording_root / "segments"
+    manifests_dir = recording_root / "manifests"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+
+    segment_0 = segments_dir / "segment_000000.ts"
+    segment_1 = segments_dir / "segment_000001.ts"
+    segment_0.write_bytes(b"segment-0")
+    segment_1.write_bytes(b"segment-1")
+
+    started_at = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
+    recording = ActiveRecording(
+        recording_id=recording_id,
+        artifact_mode="segment_native",
+        channel="alpha",
+        process=FakeProcess(),
+        segmenter_process=FakeProcess(),
+        file_path=segment_0,
+        metadata_path=recording_root / "recording.meta.json",
+        started_at=started_at,
+        source_mode="unauthenticated",
+        recording_root=recording_root,
+        full_artifact_path=manifests_dir / "full.m3u8",
+        clean_artifact_path=manifests_dir / "clean.m3u8",
+    )
+    recording.playlist_markers_seen = markers_seen
+    recording.playlist_ad_windows = []
+    return recorder, recording, segment_0, segment_1, recording_root, started_at
+
+
+def test_segment_native_finalize_compacts_clean_manifest_and_deletes_segments(tmp_path: Path) -> None:
+    recorder, recording, _segment_0, _segment_1, recording_root, started_at = _build_segment_native_finalize_fixture(
+        tmp_path,
+        recording_id="rec-compact-success",
+    )
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, stdout=None, stderr=None, text=None, encoding=None, errors=None, check=None):
+        Path(cmd[-1]).write_bytes(b"clean-ts")
+        return FakeCompletedProcess()
+
+    with (
+        patch.object(RecorderManager, "_probe_media_duration", side_effect=[10.0, 10.0]),
+        patch("app.recorder.subprocess.run", side_effect=fake_run),
+    ):
+        result = recorder._finalize_recording(
+            recording=recording,
+            ended_at=started_at + timedelta(seconds=20),
+            exit_code=0,
+            state="stopped",
+        )
+
+    compact_path = recording_root / "exports" / "clean.ts"
+    metadata = _load_metadata(recording.metadata_path)
+    assert result.clean_compact_state == "ready"
+    assert result.clean_compact_path == str(compact_path)
+    assert result.clean_compact_error is None
+    assert compact_path.exists() is True
+    assert compact_path.read_bytes() == b"clean-ts"
+    assert not list((recording_root / "segments").glob("segment_*.ts"))
+    assert metadata["clean_compact_state"] == "ready"
+    assert metadata["clean_compact_path"] == str(compact_path)
+    assert metadata["clean_compact_error"] is None
+
+
+def test_segment_native_finalize_keeps_segments_when_compact_fails(tmp_path: Path) -> None:
+    recorder, recording, _segment_0, _segment_1, recording_root, started_at = _build_segment_native_finalize_fixture(
+        tmp_path,
+        recording_id="rec-compact-fail",
+    )
+
+    class FakeCompletedProcess:
+        returncode = 1
+        stdout = ""
+        stderr = "ffmpeg exploded"
+
+    def fake_run(cmd, stdout=None, stderr=None, text=None, encoding=None, errors=None, check=None):
+        return FakeCompletedProcess()
+
+    with (
+        patch.object(RecorderManager, "_probe_media_duration", side_effect=[10.0, 10.0]),
+        patch("app.recorder.subprocess.run", side_effect=fake_run),
+    ):
+        result = recorder._finalize_recording(
+            recording=recording,
+            ended_at=started_at + timedelta(seconds=20),
+            exit_code=0,
+            state="stopped",
+        )
+
+    metadata = _load_metadata(recording.metadata_path)
+    assert result.clean_compact_state == "failed"
+    assert result.clean_compact_path is None
+    assert "ffmpeg exploded" in (result.clean_compact_error or "")
+    assert list((recording_root / "segments").glob("segment_*.ts"))
+    assert not (recording_root / "exports" / "clean.ts").exists()
+    assert metadata["clean_compact_state"] == "failed"
+    assert metadata["clean_compact_path"] is None
+    assert "ffmpeg exploded" in (metadata["clean_compact_error"] or "")
+
+
+def test_segment_native_finalize_records_segment_delete_error_without_failing_compact(
+    tmp_path: Path,
+) -> None:
+    recorder, recording, _segment_0, _segment_1, recording_root, started_at = _build_segment_native_finalize_fixture(
+        tmp_path,
+        recording_id="rec-compact-delete-error",
+    )
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, stdout=None, stderr=None, text=None, encoding=None, errors=None, check=None):
+        Path(cmd[-1]).write_bytes(b"clean-ts")
+        return FakeCompletedProcess()
+
+    original_unlink = Path.unlink
+
+    def fake_unlink(path_obj: Path, missing_ok: bool = False) -> None:
+        if path_obj.suffix == ".ts":
+            raise OSError("permission denied")
+        original_unlink(path_obj, missing_ok=missing_ok)
+
+    with (
+        patch.object(RecorderManager, "_probe_media_duration", side_effect=[10.0, 10.0]),
+        patch("app.recorder.subprocess.run", side_effect=fake_run),
+        patch("pathlib.Path.unlink", new=fake_unlink),
+    ):
+        result = recorder._finalize_recording(
+            recording=recording,
+            ended_at=started_at + timedelta(seconds=20),
+            exit_code=0,
+            state="stopped",
+        )
+
+    compact_path = recording_root / "exports" / "clean.ts"
+    metadata = _load_metadata(recording.metadata_path)
+    assert result.clean_compact_state == "ready"
+    assert result.clean_compact_path == str(compact_path)
+    assert "permission denied" in (result.clean_compact_error or "")
+    assert compact_path.exists() is True
+    assert list((recording_root / "segments").glob("segment_*.ts"))
+    assert metadata["clean_compact_state"] == "ready"
+    assert metadata["clean_compact_path"] == str(compact_path)
+    assert "permission denied" in (metadata["clean_compact_error"] or "")
