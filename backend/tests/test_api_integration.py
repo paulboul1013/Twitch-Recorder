@@ -365,6 +365,40 @@ def test_segment_native_export_creation_prefers_clean_ts_when_compact_ready(tmp_
         assert Path(enqueue.call_args.kwargs["manifest_path"]) == clean_ts
 
 
+def test_segment_native_export_creation_rejects_empty_clean_segments(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        recording_root = tmp_path / "recordings" / "alpha_20260318_120000_000004"
+        segments_dir = recording_root / "segments"
+        manifests_dir = recording_root / "manifests"
+        segments_dir.mkdir(parents=True, exist_ok=True)
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_path = segments_dir / "segment_000000.ts"
+        clean_manifest = manifests_dir / "clean.m3u8"
+        segment_path.write_bytes(b"video-data")
+        clean_manifest.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(segment_path),
+                recording_id="rec-segment-4",
+                artifact_mode="segment_native",
+                full_artifact_path=str(manifests_dir / "full.m3u8"),
+                clean_artifact_path=str(clean_manifest),
+                full_segment_count=1,
+                clean_segment_count=0,
+                clean_export_state="none",
+                watchable_state="ready",
+            )
+        )
+
+        response = client.post("/recordings/rec-segment-4/exports/clean-mp4")
+        assert response.status_code == 400
+        assert "no playable segments" in response.json()["detail"]
+
+
 def test_build_streamlink_command_uses_mpegts_for_ts_output_and_oauth_header() -> None:
     output_path = Path("/tmp/alpha_20260317_120000.ts")
     cmd, source_mode = build_streamlink_command(

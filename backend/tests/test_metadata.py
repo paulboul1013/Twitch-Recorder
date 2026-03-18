@@ -572,3 +572,42 @@ def test_segment_native_finalize_records_segment_delete_error_without_failing_co
     assert metadata["clean_compact_state"] == "ready"
     assert metadata["clean_compact_path"] == str(compact_path)
     assert "permission denied" in (metadata["clean_compact_error"] or "")
+
+
+def test_segment_native_finalize_skips_compact_when_clean_manifest_has_no_segments(
+    tmp_path: Path,
+) -> None:
+    recorder, recording, _segment_0, _segment_1, recording_root, started_at = _build_segment_native_finalize_fixture(
+        tmp_path,
+        recording_id="rec-compact-empty-clean",
+        markers_seen=True,
+    )
+    # Mark all timeline as ad so clean manifest becomes empty.
+    recording.playlist_ad_windows = [
+        (
+            started_at + timedelta(seconds=0),
+            started_at + timedelta(seconds=25),
+        )
+    ]
+
+    with (
+        patch.object(RecorderManager, "_probe_media_duration", side_effect=[10.0, 10.0]),
+        patch("app.recorder.subprocess.run") as run_mock,
+    ):
+        result = recorder._finalize_recording(
+            recording=recording,
+            ended_at=started_at + timedelta(seconds=20),
+            exit_code=0,
+            state="stopped",
+        )
+
+    metadata = _load_metadata(recording.metadata_path)
+    assert result.clean_segment_count == 0
+    assert result.clean_compact_state == "none"
+    assert result.clean_compact_path is None
+    assert result.clean_compact_error is None
+    assert list((recording_root / "segments").glob("segment_*.ts"))
+    assert run_mock.call_count == 0
+    assert metadata["clean_compact_state"] == "none"
+    assert metadata["clean_compact_path"] is None
+    assert metadata["clean_compact_error"] is None

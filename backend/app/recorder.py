@@ -1157,6 +1157,13 @@ class RecorderManager:
         clean_manifest_path = recording.clean_artifact_path
         if not clean_manifest_path.exists():
             return "failed", None, "clean manifest not found"
+        try:
+            manifest_text = clean_manifest_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return "failed", None, str(exc) or "failed to read clean manifest"
+        if "#EXTINF:" not in manifest_text:
+            # No playable media segments remain after ad filtering.
+            return "none", None, None
 
         compact_output_path = recording.recording_root / "exports" / "clean.ts"
         compact_output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -249,6 +249,12 @@ function getCleanExportStatus(recording) {
       tone: "watchable-ready",
     };
   }
+  if (Number(recording.clean_segment_count || 0) <= 0) {
+    return {
+      text: "No clean content",
+      tone: "watchable-failed",
+    };
+  }
   const state = String(recording.clean_export_state || "none").toLowerCase();
   if (state === "failed") {
     return {
@@ -502,6 +508,7 @@ function renderRecordings(recordings) {
     const cleanExportState = String(recording.clean_export_state || "none").toLowerCase();
     const isPreparing = cleanExportState === "queued" || cleanExportState === "processing";
     const isReady = cleanExportState === "ready";
+    const hasCleanContent = Number(recording.clean_segment_count || 0) > 0;
     const row = document.createElement("tr");
 
     const channelCell = document.createElement("td");
@@ -559,13 +566,19 @@ function renderRecordings(recordings) {
       downloadCleanButton.textContent = "Preparing...";
     } else if (isRecording) {
       downloadCleanButton.textContent = "Recording...";
+    } else if (!hasCleanContent) {
+      downloadCleanButton.textContent = "No clean content";
     } else {
       downloadCleanButton.textContent = "Download Clean MP4";
     }
-    downloadCleanButton.disabled = !isSegmentNative || isPreparing || isRecording;
+    downloadCleanButton.disabled = !isSegmentNative || isPreparing || isRecording || !hasCleanContent;
     downloadCleanButton.addEventListener("click", async () => {
       if (!recording.recording_id) {
         showToast("Recording id is missing");
+        return;
+      }
+      if (!hasCleanContent) {
+        showToast("No clean content is available for this recording");
         return;
       }
       if (isReady) {

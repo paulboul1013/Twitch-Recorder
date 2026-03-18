@@ -675,6 +675,9 @@ class MonitorService:
             raise ValueError("recording not found")
         if tracked.artifact_mode != "segment_native":
             raise RuntimeError("clean export is not available for legacy recordings")
+        compact_path = self._clean_compact_path_if_ready(tracked)
+        if tracked.clean_segment_count <= 0 and compact_path is None:
+            raise RuntimeError("clean recording has no playable segments")
 
         clean_input_path = self._resolve_clean_export_input_path(tracked)
         recording_root = clean_input_path.parent.parent
