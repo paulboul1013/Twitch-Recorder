@@ -175,68 +175,47 @@ function normalizeRecordingState(recordingState) {
   return recordingState;
 }
 
-function getRawFileName(recording) {
-  return recording.source_file_name || recording.file_name || "N/A";
+function toFileName(pathValue) {
+  if (!pathValue) {
+    return "N/A";
+  }
+  const parts = String(pathValue).split("/");
+  return parts[parts.length - 1] || "N/A";
 }
 
-function getWatchableStatus(recording) {
-  const watchableState = String(recording.watchable_state || "").toLowerCase();
-  const watchableAvailable = recording.watchable_available === true;
-  const watchableUnavailable = recording.watchable_available === false;
-  const watchableFileName = recording.watchable_file_name || recording.file_name;
+function triggerDownload(path) {
+  window.open(`${apiBaseUrl}${path}`, "_blank", "noopener");
+}
 
-  if (watchableState === "failed" || watchableState === "error") {
+function getCleanExportStatus(recording) {
+  if (recording.artifact_mode !== "segment_native") {
     return {
-      text: "Watchable version failed, raw file still available",
-      tone: "watchable-failed",
-    };
-  }
-
-  if (
-    !watchableAvailable &&
-    (watchableState === "pending" ||
-      watchableState === "processing" ||
-      watchableState === "queued" ||
-      watchableState === "running")
-  ) {
-    return {
-      text: "Processing watchable version",
-      tone: "watchable-pending",
-    };
-  }
-
-  if (
-    watchableAvailable ||
-    watchableState === "available" ||
-    watchableState === "ready" ||
-    watchableState === "completed" ||
-    watchableState === "succeeded" ||
-    watchableState === "success"
-  ) {
-    const fileDetail = watchableFileName ? ` · ${watchableFileName}` : "";
-    return {
-      text: `Available${fileDetail}`,
+      text: "Legacy recording",
       tone: "watchable-ready",
     };
   }
-
-  if (watchableUnavailable && !watchableState) {
+  const state = String(recording.clean_export_state || "none").toLowerCase();
+  if (state === "failed") {
     return {
-      text: "Processing watchable version",
+      text: "Export failed",
+      tone: "watchable-failed",
+    };
+  }
+  if (state === "queued" || state === "processing") {
+    return {
+      text: formatState(state),
       tone: "watchable-pending",
     };
   }
-
-  if (watchableState) {
+  if (state === "ready") {
     return {
-      text: formatState(watchableState),
-      tone: "watchable-pending",
+      text: `Ready · ${toFileName(recording.clean_export_path)}`,
+      tone: "watchable-ready",
     };
   }
-
   return {
-    text: "Available · raw file",
-    tone: "watchable-ready",
+    text: "Not exported",
+    tone: "watchable-pending",
   };
 }
 
@@ -438,33 +417,97 @@ function renderRecordings(recordings) {
   elements.recordingsTable.hidden = visibleRecordings.length === 0;
 
   for (const recording of visibleRecordings) {
-    const watchableStatus = getWatchableStatus(recording);
+    const exportStatus = getCleanExportStatus(recording);
     const row = document.createElement("tr");
+
     const channelCell = document.createElement("td");
     channelCell.className = "channel";
     channelCell.textContent = recording.channel || "N/A";
 
-    const rawFileCell = document.createElement("td");
-    const rawCode = document.createElement("code");
-    rawCode.textContent = getRawFileName(recording);
-    rawFileCell.append(rawCode);
+    const fullCell = document.createElement("td");
+    const fullCode = document.createElement("code");
+    fullCode.textContent = toFileName(recording.full_artifact_path || recording.source_file_path);
+    fullCell.append(fullCode);
     if (Number.isFinite(recording.size_bytes)) {
       const sizeMeta = document.createElement("div");
       sizeMeta.className = "recording-meta";
       sizeMeta.textContent = formatBytes(recording.size_bytes);
-      rawFileCell.append(sizeMeta);
+      fullCell.append(sizeMeta);
+    }
+    const fullDownloadButton = document.createElement("button");
+    fullDownloadButton.className = "secondary";
+    fullDownloadButton.textContent = "Download Full";
+    fullDownloadButton.disabled = !recording.recording_id;
+    fullDownloadButton.addEventListener("click", () => {
+      triggerDownload(`/recordings/${encodeURIComponent(recording.recording_id)}/download/full`);
+    });
+    fullCell.append(fullDownloadButton);
+
+    const cleanCell = document.createElement("td");
+    const cleanCode = document.createElement("code");
+    cleanCode.textContent = toFileName(recording.clean_artifact_path);
+    cleanCell.append(cleanCode);
+    const cleanDownloadButton = document.createElement("button");
+    cleanDownloadButton.className = "secondary";
+    cleanDownloadButton.textContent = "Download Clean Manifest";
+    cleanDownloadButton.disabled =
+      recording.artifact_mode !== "segment_native" || !recording.clean_artifact_path;
+    cleanDownloadButton.addEventListener("click", () => {
+      triggerDownload(
+        `/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-manifest`,
+      );
+    });
+    cleanCell.append(cleanDownloadButton);
+
+    const exportCell = document.createElement("td");
+    const exportLabel = document.createElement("span");
+    exportLabel.className = `watchable-status ${exportStatus.tone}`;
+    exportLabel.textContent = exportStatus.text;
+    exportCell.append(exportLabel);
+
+    if (recording.clean_export_error) {
+      const exportError = document.createElement("div");
+      exportError.className = "recording-meta";
+      exportError.textContent = recording.clean_export_error;
+      exportCell.append(exportError);
     }
 
-    const watchableCell = document.createElement("td");
-    const watchableLabel = document.createElement("span");
-    watchableLabel.className = `watchable-status ${watchableStatus.tone}`;
-    watchableLabel.textContent = watchableStatus.text;
-    watchableCell.append(watchableLabel);
+    const exportButton = document.createElement("button");
+    exportButton.textContent = "Export Clean MP4";
+    exportButton.disabled =
+      recording.artifact_mode !== "segment_native" ||
+      recording.clean_export_state === "queued" ||
+      recording.clean_export_state === "processing";
+    exportButton.addEventListener("click", async () => {
+      exportButton.disabled = true;
+      exportButton.textContent = "Queueing...";
+      try {
+        await request(`/recordings/${encodeURIComponent(recording.recording_id)}/exports/clean-mp4`, {
+          method: "POST",
+        });
+        showToast(`Export queued for ${recording.channel}`);
+        await refreshRecordings();
+      } catch (error) {
+        exportButton.disabled = false;
+        exportButton.textContent = "Export Clean MP4";
+        showToast(error.message);
+      }
+    });
+    exportCell.append(exportButton);
+
+    const downloadCleanButton = document.createElement("button");
+    downloadCleanButton.className = "secondary";
+    downloadCleanButton.textContent = "Download Clean MP4";
+    downloadCleanButton.disabled = recording.clean_export_state !== "ready";
+    downloadCleanButton.addEventListener("click", () => {
+      triggerDownload(`/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-mp4`);
+    });
+    exportCell.append(downloadCleanButton);
 
     const modifiedCell = document.createElement("td");
     modifiedCell.textContent = formatDate(recording.modified_at);
 
-    row.append(channelCell, rawFileCell, watchableCell, modifiedCell);
+    row.append(channelCell, fullCell, cleanCell, exportCell, modifiedCell);
     elements.recordingsBody.append(row);
   }
 }

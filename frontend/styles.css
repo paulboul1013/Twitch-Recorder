@@ -419,6 +419,11 @@ td code {
   font-size: 0.85rem;
 }
 
+td button {
+  margin-top: 8px;
+  margin-right: 8px;
+}
+
 .recording-meta {
   margin-top: 4px;
   color: var(--muted);
