@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -9,19 +12,25 @@ from pathlib import Path
 class StreamerStore:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._lock = threading.RLock()
 
     def load(self) -> list[str]:
-        if not self.path.exists():
-            return []
+        with self._lock:
+            if not self.path.exists():
+                return []
 
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        if not isinstance(payload, list):
-            raise ValueError("streamers store must contain a JSON list")
-        return sorted({str(item).strip().lower() for item in payload if str(item).strip()})
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(payload, list):
+                raise ValueError("streamers store must contain a JSON list")
+            return sorted({str(item).strip().lower() for item in payload if str(item).strip()})
 
     def save(self, streamers: list[str]) -> None:
         normalized = sorted({name.strip().lower() for name in streamers if name.strip()})
-        self.path.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+        with self._lock:
+            _write_text_atomic(
+                self.path,
+                json.dumps(normalized, indent=2),
+            )
 
 
 @dataclass(slots=True)
@@ -49,6 +58,7 @@ class TrackedRecording:
     clean_export_state: str = "none"
     clean_export_path: str | None = None
     clean_export_error: str | None = None
+    unknown_ad_confidence: bool = False
 
     def __post_init__(self) -> None:
         if not self.recording_id:
@@ -74,6 +84,7 @@ class TrackedRecording:
         if normalized_export_state not in {"none", "queued", "processing", "ready", "failed"}:
             normalized_export_state = "none"
         self.clean_export_state = normalized_export_state
+        self.unknown_ad_confidence = bool(self.unknown_ad_confidence)
 
     @property
     def file_path(self) -> str:
@@ -99,14 +110,30 @@ def _derive_recording_id(*, channel: str, source_file_path: str) -> str:
 class RecordingHistoryStore:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._lock = threading.RLock()
 
-    def load(self) -> list[TrackedRecording]:
+    def _load_payload(self) -> list[object]:
         if not self.path.exists():
             return []
 
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        content = self.path.read_text(encoding="utf-8")
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            # Recover from trailing garbage caused by interrupted/overlapped writes.
+            decoder = json.JSONDecoder()
+            stripped = content.lstrip()
+            payload, end_index = decoder.raw_decode(stripped)
+            trailing = stripped[end_index:].strip()
+            if trailing:
+                _write_text_atomic(self.path, json.dumps(payload, indent=2))
         if not isinstance(payload, list):
             raise ValueError("recordings store must contain a JSON list")
+        return payload
+
+    def load(self) -> list[TrackedRecording]:
+        with self._lock:
+            payload = self._load_payload()
 
         entries: list[TrackedRecording] = []
         used_recording_ids: set[str] = set()
@@ -177,6 +204,7 @@ class RecordingHistoryStore:
 
             clean_export_path = item.get("clean_export_path")
             clean_export_error = item.get("clean_export_error")
+            unknown_ad_confidence = bool(item.get("unknown_ad_confidence", False))
             source_available_value = item.get("source_available")
             source_deleted_value = item.get("source_deleted_on_success")
             source_delete_error = item.get("source_delete_error")
@@ -223,22 +251,48 @@ class RecordingHistoryStore:
                     clean_export_error=(
                         str(clean_export_error).strip() if clean_export_error else None
                     ),
+                    unknown_ad_confidence=unknown_ad_confidence,
                 )
             )
         return entries
 
     def save(self, recordings: list[TrackedRecording]) -> None:
-        self.path.write_text(
-            json.dumps([asdict(recording) for recording in recordings], indent=2),
-            encoding="utf-8",
-        )
+        with self._lock:
+            _write_text_atomic(
+                self.path,
+                json.dumps([asdict(recording) for recording in recordings], indent=2),
+            )
 
     def upsert(self, recording: TrackedRecording) -> None:
-        recordings = [
-            item
-            for item in self.load()
-            if item.recording_id != recording.recording_id
-            and item.source_file_path != recording.source_file_path
-        ]
-        recordings.insert(0, recording)
-        self.save(recordings)
+        with self._lock:
+            recordings = [
+                item
+                for item in self.load()
+                if item.recording_id != recording.recording_id
+                and item.source_file_path != recording.source_file_path
+            ]
+            recordings.insert(0, recording)
+            self.save(recordings)
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+        try:
+            os.chmod(path, 0o644)
+        except OSError:
+            pass
+    finally:
+        tmp_path = Path(tmp_name)
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
