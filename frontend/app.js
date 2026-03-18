@@ -7,6 +7,7 @@ const state = {
   pollingCountdownSeconds: Math.floor(pollIntervalMs / 1000),
   pollingTimerId: null,
   pollingCountdownId: null,
+  recordingsFollowupTimerId: null,
   refreshInFlight: false,
 };
 
@@ -34,6 +35,7 @@ const elements = {
 
 async function request(path, options = {}) {
   const response = await fetch(`${apiBaseUrl}${path}`, {
+    cache: "no-store",
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {}),
@@ -144,18 +146,22 @@ function formatDate(value) {
   }).format(new Date(value));
 }
 
-function formatBytes(size) {
-  if (!Number.isFinite(size)) {
-    return "N/A";
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
   }
+
   const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = size;
+  let scaled = bytes;
   let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
+  while (scaled >= 1024 && unitIndex < units.length - 1) {
+    scaled /= 1024;
     unitIndex += 1;
   }
-  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+
+  const fractionDigits = scaled >= 100 || unitIndex === 0 ? 0 : 1;
+  return `${scaled.toFixed(fractionDigits)} ${units[unitIndex]}`;
 }
 
 function formatState(value) {
@@ -175,19 +181,60 @@ function normalizeRecordingState(recordingState) {
   return recordingState;
 }
 
-function toFileName(pathValue) {
-  if (!pathValue) {
-    return "N/A";
-  }
-  const parts = String(pathValue).split("/");
-  return parts[parts.length - 1] || "N/A";
-}
-
 function triggerDownload(path) {
   window.open(`${apiBaseUrl}${path}`, "_blank", "noopener");
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function scheduleRecordingsFollowupRefresh() {
+  if (state.recordingsFollowupTimerId !== null) {
+    return;
+  }
+  state.recordingsFollowupTimerId = window.setTimeout(async () => {
+    state.recordingsFollowupTimerId = null;
+    try {
+      await refreshRecordings();
+    } catch (_) {
+      // Best-effort background refresh for export status transitions.
+    }
+  }, 2000);
+}
+
+function clearRecordingsFollowupRefresh() {
+  if (state.recordingsFollowupTimerId !== null) {
+    window.clearTimeout(state.recordingsFollowupTimerId);
+    state.recordingsFollowupTimerId = null;
+  }
+}
+
+async function waitForCleanExportReady(recordingId, { timeoutMs = 120000, intervalMs = 1500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = await request(`/recordings/${encodeURIComponent(recordingId)}/exports/clean-mp4`);
+    const exportState = String(status.state || "").toLowerCase();
+    if (exportState === "ready") {
+      return;
+    }
+    if (exportState === "failed") {
+      throw new Error(status.error || "Clean MP4 export failed");
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error("Clean MP4 export is still processing, please try again shortly.");
+}
+
 function getCleanExportStatus(recording) {
+  if (recording.is_recording) {
+    return {
+      text: "Recording",
+      tone: "watchable-pending",
+    };
+  }
   if (recording.artifact_mode !== "segment_native") {
     return {
       text: "Legacy recording",
@@ -209,7 +256,7 @@ function getCleanExportStatus(recording) {
   }
   if (state === "ready") {
     return {
-      text: `Ready · ${toFileName(recording.clean_export_path)}`,
+      text: "Ready",
       tone: "watchable-ready",
     };
   }
@@ -418,52 +465,44 @@ function renderRecordings(recordings) {
 
   for (const recording of visibleRecordings) {
     const exportStatus = getCleanExportStatus(recording);
+    const isSegmentNative = recording.artifact_mode === "segment_native";
+    const isRecording = Boolean(recording.is_recording);
+    const cleanExportState = String(recording.clean_export_state || "none").toLowerCase();
+    const isPreparing = cleanExportState === "queued" || cleanExportState === "processing";
+    const isReady = cleanExportState === "ready";
     const row = document.createElement("tr");
 
     const channelCell = document.createElement("td");
     channelCell.className = "channel";
-    channelCell.textContent = recording.channel || "N/A";
+    const channelName = document.createElement("div");
+    channelName.textContent = recording.channel || "N/A";
+    channelCell.append(channelName);
 
-    const fullCell = document.createElement("td");
-    const fullCode = document.createElement("code");
-    fullCode.textContent = toFileName(recording.full_artifact_path || recording.source_file_path);
-    fullCell.append(fullCode);
-    if (Number.isFinite(recording.size_bytes)) {
-      const sizeMeta = document.createElement("div");
-      sizeMeta.className = "recording-meta";
-      sizeMeta.textContent = formatBytes(recording.size_bytes);
-      fullCell.append(sizeMeta);
+    const fileMeta = document.createElement("div");
+    fileMeta.className = "recording-meta";
+    const sourceFileName = recording.source_file_name || recording.file_name || "N/A";
+    fileMeta.textContent = `${sourceFileName} (${formatBytes(recording.size_bytes)})`;
+    channelCell.append(fileMeta);
+
+    if (isRecording) {
+      const activeHint = document.createElement("div");
+      activeHint.className = "recording-meta";
+      activeHint.textContent = "Recording in progress";
+      channelCell.append(activeHint);
     }
-    const fullDownloadButton = document.createElement("button");
-    fullDownloadButton.className = "secondary";
-    fullDownloadButton.textContent = "Download Full";
-    fullDownloadButton.disabled = !recording.recording_id;
-    fullDownloadButton.addEventListener("click", () => {
-      triggerDownload(`/recordings/${encodeURIComponent(recording.recording_id)}/download/full`);
-    });
-    fullCell.append(fullDownloadButton);
-
-    const cleanCell = document.createElement("td");
-    const cleanCode = document.createElement("code");
-    cleanCode.textContent = toFileName(recording.clean_artifact_path);
-    cleanCell.append(cleanCode);
-    const cleanDownloadButton = document.createElement("button");
-    cleanDownloadButton.className = "secondary";
-    cleanDownloadButton.textContent = "Download Clean Manifest";
-    cleanDownloadButton.disabled =
-      recording.artifact_mode !== "segment_native" || !recording.clean_artifact_path;
-    cleanDownloadButton.addEventListener("click", () => {
-      triggerDownload(
-        `/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-manifest`,
-      );
-    });
-    cleanCell.append(cleanDownloadButton);
 
     const exportCell = document.createElement("td");
     const exportLabel = document.createElement("span");
     exportLabel.className = `watchable-status ${exportStatus.tone}`;
     exportLabel.textContent = exportStatus.text;
     exportCell.append(exportLabel);
+
+    if (recording.unknown_ad_confidence && isSegmentNative) {
+      const confidenceHint = document.createElement("div");
+      confidenceHint.className = "recording-meta";
+      confidenceHint.textContent = "Ad markers unavailable, clean may equal full";
+      exportCell.append(confidenceHint);
+    }
 
     if (recording.clean_export_error) {
       const exportError = document.createElement("div");
@@ -472,42 +511,48 @@ function renderRecordings(recordings) {
       exportCell.append(exportError);
     }
 
-    const exportButton = document.createElement("button");
-    exportButton.textContent = "Export Clean MP4";
-    exportButton.disabled =
-      recording.artifact_mode !== "segment_native" ||
-      recording.clean_export_state === "queued" ||
-      recording.clean_export_state === "processing";
-    exportButton.addEventListener("click", async () => {
-      exportButton.disabled = true;
-      exportButton.textContent = "Queueing...";
+    const downloadCleanButton = document.createElement("button");
+    downloadCleanButton.className = "secondary";
+    if (isPreparing) {
+      downloadCleanButton.textContent = "Preparing...";
+    } else if (isRecording) {
+      downloadCleanButton.textContent = "Recording...";
+    } else {
+      downloadCleanButton.textContent = "Download Clean MP4";
+    }
+    downloadCleanButton.disabled = !isSegmentNative || isPreparing || isRecording;
+    downloadCleanButton.addEventListener("click", async () => {
+      if (!recording.recording_id) {
+        showToast("Recording id is missing");
+        return;
+      }
+      if (isReady) {
+        triggerDownload(`/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-mp4`);
+        return;
+      }
+      downloadCleanButton.disabled = true;
+      downloadCleanButton.textContent = "Preparing...";
       try {
         await request(`/recordings/${encodeURIComponent(recording.recording_id)}/exports/clean-mp4`, {
           method: "POST",
         });
-        showToast(`Export queued for ${recording.channel}`);
+        showToast(`Preparing Clean MP4 for ${recording.channel}`);
         await refreshRecordings();
+        await waitForCleanExportReady(recording.recording_id);
+        await refreshRecordings();
+        triggerDownload(`/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-mp4`);
       } catch (error) {
-        exportButton.disabled = false;
-        exportButton.textContent = "Export Clean MP4";
+        downloadCleanButton.disabled = false;
+        downloadCleanButton.textContent = "Download Clean MP4";
         showToast(error.message);
       }
-    });
-    exportCell.append(exportButton);
-
-    const downloadCleanButton = document.createElement("button");
-    downloadCleanButton.className = "secondary";
-    downloadCleanButton.textContent = "Download Clean MP4";
-    downloadCleanButton.disabled = recording.clean_export_state !== "ready";
-    downloadCleanButton.addEventListener("click", () => {
-      triggerDownload(`/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-mp4`);
     });
     exportCell.append(downloadCleanButton);
 
     const modifiedCell = document.createElement("td");
     modifiedCell.textContent = formatDate(recording.modified_at);
 
-    row.append(channelCell, fullCell, cleanCell, exportCell, modifiedCell);
+    row.append(channelCell, exportCell, modifiedCell);
     elements.recordingsBody.append(row);
   }
 }
@@ -526,6 +571,18 @@ async function refreshStatuses() {
 async function refreshRecordings() {
   const recordings = await request("/recordings");
   renderRecordings(recordings);
+  const needsFollowup = recordings.some((recording) => {
+    if (recording.is_recording) {
+      return true;
+    }
+    const exportState = String(recording.clean_export_state || "none").toLowerCase();
+    return exportState === "queued" || exportState === "processing";
+  });
+  if (needsFollowup) {
+    scheduleRecordingsFollowupRefresh();
+  } else {
+    clearRecordingsFollowupRefresh();
+  }
 }
 
 async function refreshAllData({ silent = false } = {}) {
@@ -555,7 +612,7 @@ elements.refreshAll.addEventListener("click", async () => {
 elements.refreshStatus.addEventListener("click", async () => {
   try {
     await request("/refresh", { method: "POST" });
-    await refreshStatuses();
+    await Promise.all([refreshStatuses(), refreshRecordings()]);
     showToast("Status refreshed");
   } catch (error) {
     showToast(error.message);
