@@ -255,52 +255,35 @@ function getCleanExportStatus(recording) {
       tone: "watchable-failed",
     };
   }
-  const state = String(recording.clean_export_state || "none").toLowerCase();
-  if (state === "failed") {
+  const exportState = String(recording.clean_export_state || "none").toLowerCase();
+  const compactState = String(recording.clean_compact_state || "none").toLowerCase();
+  if (exportState === "failed" || compactState === "failed") {
     return {
       text: "Export failed",
       tone: "watchable-failed",
     };
   }
-  if (state === "queued" || state === "processing") {
+  if (
+    exportState === "queued" ||
+    exportState === "processing" ||
+    compactState === "queued" ||
+    compactState === "processing"
+  ) {
     return {
-      text: formatState(state),
+      text: "Processing",
       tone: "watchable-pending",
     };
   }
-  if (state === "ready") {
+  if (compactState === "ready" || exportState === "ready") {
     return {
-      text: "Ready",
+      text: "Ready to export MP4",
       tone: "watchable-ready",
     };
   }
   return {
-    text: "Not exported",
+    text: "Processing",
     tone: "watchable-pending",
   };
-}
-
-function getCompactStatus(recording) {
-  const state = String(recording.clean_compact_state || "none").toLowerCase();
-  if (state === "queued" || state === "processing") {
-    return {
-      text: "Compacting...",
-      tone: "watchable-pending",
-    };
-  }
-  if (state === "ready") {
-    return {
-      text: `Clean TS ready${recording.clean_compact_path ? ` · ${toFileName(recording.clean_compact_path)}` : ""}`,
-      tone: "watchable-ready",
-    };
-  }
-  if (state === "failed") {
-    return {
-      text: recording.clean_compact_error || "Compact failed",
-      tone: "watchable-failed",
-    };
-  }
-  return null;
 }
 
 function createAvatar(name, profileImageUrl) {
@@ -502,7 +485,6 @@ function renderRecordings(recordings) {
 
   for (const recording of visibleRecordings) {
     const exportStatus = getCleanExportStatus(recording);
-    const compactStatus = getCompactStatus(recording);
     const isSegmentNative = recording.artifact_mode === "segment_native";
     const isRecording = Boolean(recording.is_recording);
     const cleanExportState = String(recording.clean_export_state || "none").toLowerCase();
@@ -539,17 +521,10 @@ function renderRecordings(recordings) {
     exportLabel.textContent = exportStatus.text;
     exportCell.append(exportLabel);
 
-    if (compactStatus) {
-      const compactLabel = document.createElement("span");
-      compactLabel.className = `watchable-status ${compactStatus.tone}`;
-      compactLabel.textContent = compactStatus.text;
-      exportCell.append(compactLabel);
-    }
-
     if (recording.unknown_ad_confidence && isSegmentNative) {
       const confidenceHint = document.createElement("div");
       confidenceHint.className = "recording-meta";
-      confidenceHint.textContent = "Ad markers unavailable, clean may equal full";
+      confidenceHint.textContent = "No ads detected";
       exportCell.append(confidenceHint);
     }
 
