@@ -26,6 +26,7 @@ from .ad_detection import (
     ranges_intersect,
 )
 from .api_integration import build_streamlink_command, build_streamlink_stream_url_command
+from .file_naming import build_recording_output_filename
 from .finalizer import RecordingFinalizer
 from .metadata import RecordingMetadataWriter
 from .recording_types import ActiveRecording, RecordingEvent, RecordingResult, WatchableMetadataContext
@@ -842,7 +843,16 @@ class RecorderManager:
         full_artifact_path = recording.full_artifact_path or recording.file_path
         clean_artifact_path = recording.clean_artifact_path
         clean_compact_path = (
-            str(recording.recording_root / "exports" / "clean.ts")
+            str(
+                recording.recording_root
+                / "exports"
+                / build_recording_output_filename(
+                    channel=recording.channel,
+                    started_at=recording.started_at,
+                    ended_at=ended_at,
+                    extension="ts",
+                )
+            )
             if recording.artifact_mode == "segment_native" and recording.recording_root is not None
             else None
         )
@@ -924,6 +934,7 @@ class RecorderManager:
             if clean_output_state == "ready":
                 clean_compact_state, clean_compact_path, clean_compact_error = self._compact_segment_native_output(
                     recording=recording,
+                    ended_at=ended_at,
                 )
             else:
                 clean_compact_state = "failed"
@@ -1150,6 +1161,7 @@ class RecorderManager:
         self,
         *,
         recording: ActiveRecording,
+        ended_at: datetime,
     ) -> tuple[str, str | None, str | None]:
         if recording.recording_root is None or recording.clean_artifact_path is None:
             return "failed", None, "segment-native manifest path is missing"
@@ -1165,7 +1177,12 @@ class RecorderManager:
             # No playable media segments remain after ad filtering.
             return "none", None, None
 
-        compact_output_path = recording.recording_root / "exports" / "clean.ts"
+        compact_output_path = recording.recording_root / "exports" / build_recording_output_filename(
+            channel=recording.channel,
+            started_at=recording.started_at,
+            ended_at=ended_at,
+            extension="ts",
+        )
         compact_output_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{compact_output_path.name}.",

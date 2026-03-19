@@ -9,6 +9,7 @@ import httpx
 
 from .clean_export import CleanExportJob, CleanExportManager
 from .config import Settings
+from .file_naming import build_recording_output_filename, parse_recording_timestamp
 from .models import (
     CleanExportStatusResponse,
     RecordingInfo,
@@ -681,7 +682,16 @@ class MonitorService:
 
         clean_input_path = self._resolve_clean_export_input_path(tracked)
         recording_root = clean_input_path.parent.parent
-        output_path = recording_root / "exports" / "clean.mp4"
+        started_at = parse_recording_timestamp(tracked.started_at)
+        ended_at = parse_recording_timestamp(tracked.ended_at)
+        if started_at is None or ended_at is None:
+            raise RuntimeError("recording timestamps are unavailable for clean export naming")
+        output_path = recording_root / "exports" / build_recording_output_filename(
+            channel=tracked.channel,
+            started_at=started_at,
+            ended_at=ended_at,
+            extension="mp4",
+        )
 
         job = self._clean_export_manager.enqueue(
             recording_id=recording_id,
