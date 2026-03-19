@@ -9,6 +9,7 @@ const state = {
   pollingCountdownId: null,
   recordingsFollowupTimerId: null,
   refreshInFlight: false,
+  statusCarouselIndex: 0,
 };
 
 const elements = {
@@ -312,6 +313,16 @@ function createStatusDetailRow(labelText, valueText) {
   return row;
 }
 
+function shiftStatusCarousel(statuses, step) {
+  if (!statuses.length) {
+    state.statusCarouselIndex = 0;
+    return;
+  }
+  const nextIndex = state.statusCarouselIndex + step;
+  state.statusCarouselIndex = (nextIndex + statuses.length) % statuses.length;
+  renderStatuses(statuses);
+}
+
 function renderStreamers(streamers) {
   elements.streamerCount.textContent = String(streamers.length);
   elements.streamersList.replaceChildren();
@@ -349,132 +360,169 @@ function renderStatuses(statuses) {
   elements.summaryRecording.textContent = String(statuses.filter((status) => status.is_recording).length);
   elements.summaryLive.textContent = String(statuses.filter((status) => status.is_live).length);
 
-  for (const status of statuses) {
-    const card = document.createElement("article");
-    card.className = "status-card";
-
-    const top = document.createElement("div");
-    top.className = "status-top";
-
-    const name = document.createElement("strong");
-    name.className = "channel";
-    name.textContent = status.name;
-
-    const badges = document.createElement("div");
-    badges.className = "status-badges";
-    const liveBadge = document.createElement("span");
-    liveBadge.className = `badge ${status.is_live ? "live" : "offline"}`;
-    liveBadge.textContent = status.is_live ? "LIVE" : "OFFLINE";
-
-    badges.append(liveBadge);
-    if (status.is_recording) {
-      const recordingBadge = document.createElement("span");
-      recordingBadge.className = "badge recording";
-      recordingBadge.textContent = "RECORDING";
-      badges.append(recordingBadge);
-    }
-
-    const heading = document.createElement("div");
-    heading.className = "status-heading";
-
-    const identity = document.createElement("div");
-    identity.className = "status-identity";
-    identity.append(createAvatar(status.name, status.profile_image_url), name);
-
-    if (status.is_recording) {
-      const liveMotion = document.createElement("div");
-      liveMotion.className = "recording-motion";
-      liveMotion.setAttribute("aria-hidden", "true");
-      const recordingDot = document.createElement("span");
-      recordingDot.className = "recording-dot";
-      liveMotion.append(recordingDot);
-      for (let index = 0; index < 3; index += 1) {
-        const recordingWave = document.createElement("span");
-        recordingWave.className = "recording-wave";
-        liveMotion.append(recordingWave);
-      }
-      identity.append(liveMotion);
-    }
-
-    heading.append(identity, badges);
-
-    const actions = document.createElement("div");
-    actions.className = "status-actions";
-    if (status.is_recording) {
-      const stopButton = document.createElement("button");
-      stopButton.className = "danger";
-      stopButton.textContent = "Stop Recording";
-      stopButton.addEventListener("click", async () => {
-        stopButton.disabled = true;
-        stopButton.textContent = "Stopping...";
-        try {
-          const result = await request(`/streamers/${encodeURIComponent(status.name)}/stop`, {
-            method: "POST",
-          });
-          if (result.stopped) {
-            showToast(`Stopped recording for ${status.name}`);
-          } else {
-            showToast(`No active recording for ${status.name}`);
-          }
-          await refreshAllData();
-        } catch (error) {
-          stopButton.disabled = false;
-          stopButton.textContent = "Stop Recording";
-          showToast(error.message);
-        }
-      });
-      actions.append(stopButton);
-    } else if (status.is_live) {
-      const startButton = document.createElement("button");
-      startButton.textContent = "Start Recording";
-      startButton.addEventListener("click", async () => {
-        startButton.disabled = true;
-        startButton.textContent = "Starting...";
-        try {
-          const result = await request(`/streamers/${encodeURIComponent(status.name)}/start`, {
-            method: "POST",
-          });
-          if (result.started) {
-            showToast(`Started recording for ${status.name}`);
-          } else {
-            showToast(`Could not start recording for ${status.name}`);
-          }
-          await refreshAllData();
-        } catch (error) {
-          startButton.disabled = false;
-          startButton.textContent = "Start Recording";
-          showToast(error.message);
-        }
-      });
-      actions.append(startButton);
-    }
-
-    top.append(heading, actions);
-
-    const details = document.createElement("div");
-    details.className = "status-details";
-    details.append(
-      createStatusDetailRow(
-        "Recording State",
-        formatState(normalizeRecordingState(status.recording_state)),
-      ),
-      createStatusDetailRow("Title", status.title || "N/A"),
-      createStatusDetailRow("Game", status.game_name || "N/A"),
-      createStatusDetailRow("Viewers", String(status.viewer_count ?? "N/A")),
-      createStatusDetailRow("Live Started", formatDate(status.started_at)),
-      createStatusDetailRow("Checked", formatDate(status.last_checked_at)),
-      createStatusDetailRow("Offline Since", formatDate(status.offline_since)),
-      createStatusDetailRow("Stop After", formatDate(status.stop_after_at)),
-      createStatusDetailRow("Recording Started", formatDate(status.recording_started_at)),
-      createStatusDetailRow("Recording Ended", formatDate(status.recording_ended_at)),
-      createStatusDetailRow("Exit Code", String(status.recording_exit_code ?? "N/A")),
-      createStatusDetailRow("Output", status.output_path || "N/A"),
-      createStatusDetailRow("Error", status.last_error || "None"),
-    );
-
-    card.append(top, details);
-    elements.statusCards.append(card);
+  if (!statuses.length) {
+    state.statusCarouselIndex = 0;
+    return;
   }
+
+  state.statusCarouselIndex = Math.max(0, Math.min(state.statusCarouselIndex, statuses.length - 1));
+  const status = statuses[state.statusCarouselIndex];
+
+  const card = document.createElement("article");
+  card.className = "status-card";
+
+  const top = document.createElement("div");
+  top.className = "status-top";
+
+  const name = document.createElement("strong");
+  name.className = "channel";
+  name.textContent = status.name;
+
+  const badges = document.createElement("div");
+  badges.className = "status-badges";
+  const liveBadge = document.createElement("span");
+  liveBadge.className = `badge ${status.is_live ? "live" : "offline"}`;
+  liveBadge.textContent = status.is_live ? "LIVE" : "OFFLINE";
+
+  badges.append(liveBadge);
+  if (status.is_recording) {
+    const recordingBadge = document.createElement("span");
+    recordingBadge.className = "badge recording";
+    recordingBadge.textContent = "RECORDING";
+    badges.append(recordingBadge);
+  }
+
+  const heading = document.createElement("div");
+  heading.className = "status-heading";
+
+  const identity = document.createElement("div");
+  identity.className = "status-identity";
+  identity.append(createAvatar(status.name, status.profile_image_url), name);
+
+  if (status.is_recording) {
+    const liveMotion = document.createElement("div");
+    liveMotion.className = "recording-motion";
+    liveMotion.setAttribute("aria-hidden", "true");
+    const recordingDot = document.createElement("span");
+    recordingDot.className = "recording-dot";
+    liveMotion.append(recordingDot);
+    for (let index = 0; index < 3; index += 1) {
+      const recordingWave = document.createElement("span");
+      recordingWave.className = "recording-wave";
+      liveMotion.append(recordingWave);
+    }
+    identity.append(liveMotion);
+  }
+
+  heading.append(identity, badges);
+
+  const actions = document.createElement("div");
+  actions.className = "status-actions";
+  if (status.is_recording) {
+    const stopButton = document.createElement("button");
+    stopButton.className = "danger";
+    stopButton.textContent = "Stop Recording";
+    stopButton.addEventListener("click", async () => {
+      stopButton.disabled = true;
+      stopButton.textContent = "Stopping...";
+      try {
+        const result = await request(`/streamers/${encodeURIComponent(status.name)}/stop`, {
+          method: "POST",
+        });
+        if (result.stopped) {
+          showToast(`Stopped recording for ${status.name}`);
+        } else {
+          showToast(`No active recording for ${status.name}`);
+        }
+        await refreshAllData();
+      } catch (error) {
+        stopButton.disabled = false;
+        stopButton.textContent = "Stop Recording";
+        showToast(error.message);
+      }
+    });
+    actions.append(stopButton);
+  } else if (status.is_live) {
+    const startButton = document.createElement("button");
+    startButton.textContent = "Start Recording";
+    startButton.addEventListener("click", async () => {
+      startButton.disabled = true;
+      startButton.textContent = "Starting...";
+      try {
+        const result = await request(`/streamers/${encodeURIComponent(status.name)}/start`, {
+          method: "POST",
+        });
+        if (result.started) {
+          showToast(`Started recording for ${status.name}`);
+        } else {
+          showToast(`Could not start recording for ${status.name}`);
+        }
+        await refreshAllData();
+      } catch (error) {
+        startButton.disabled = false;
+        startButton.textContent = "Start Recording";
+        showToast(error.message);
+      }
+    });
+    actions.append(startButton);
+  }
+
+  top.append(heading, actions);
+
+  const details = document.createElement("div");
+  details.className = "status-details";
+  details.append(
+    createStatusDetailRow(
+      "Recording State",
+      formatState(normalizeRecordingState(status.recording_state)),
+    ),
+    createStatusDetailRow("Title", status.title || "N/A"),
+    createStatusDetailRow("Game", status.game_name || "N/A"),
+    createStatusDetailRow("Viewers", String(status.viewer_count ?? "N/A")),
+    createStatusDetailRow("Live Started", formatDate(status.started_at)),
+    createStatusDetailRow("Checked", formatDate(status.last_checked_at)),
+    createStatusDetailRow("Offline Since", formatDate(status.offline_since)),
+    createStatusDetailRow("Stop After", formatDate(status.stop_after_at)),
+    createStatusDetailRow("Recording Started", formatDate(status.recording_started_at)),
+    createStatusDetailRow("Recording Ended", formatDate(status.recording_ended_at)),
+    createStatusDetailRow("Exit Code", String(status.recording_exit_code ?? "N/A")),
+    createStatusDetailRow("Output", status.output_path || "N/A"),
+    createStatusDetailRow("Error", status.last_error || "None"),
+  );
+
+  card.append(top, details);
+
+  if (statuses.length > 1) {
+    const carouselControls = document.createElement("div");
+    carouselControls.className = "status-carousel";
+
+    const previousButton = document.createElement("button");
+    previousButton.className = "secondary status-carousel-button";
+    previousButton.type = "button";
+    previousButton.textContent = "<";
+    previousButton.setAttribute("aria-label", "Show previous streamer");
+    previousButton.addEventListener("click", () => {
+      shiftStatusCarousel(statuses, -1);
+    });
+
+    const statusPosition = document.createElement("div");
+    statusPosition.className = "status-carousel-position";
+    statusPosition.textContent = `${state.statusCarouselIndex + 1} / ${statuses.length}`;
+
+    const nextButton = document.createElement("button");
+    nextButton.className = "secondary status-carousel-button";
+    nextButton.type = "button";
+    nextButton.textContent = ">";
+    nextButton.setAttribute("aria-label", "Show next streamer");
+    nextButton.addEventListener("click", () => {
+      shiftStatusCarousel(statuses, 1);
+    });
+
+    carouselControls.append(previousButton, statusPosition, nextButton);
+    card.append(carouselControls);
+  }
+
+  elements.statusCards.append(card);
 }
 
 function renderRecordings(recordings) {
