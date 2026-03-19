@@ -23,8 +23,7 @@ English users: see [README_EN.md](./README_EN.md).
 - 直播結束後保留短暫寬限期，再自動停止錄影
 - 直播中可手動開始或停止錄影
 - 查看目前誰正在直播、誰正在錄影，以及目前錄影狀態
-- 查看最近錄好的影片檔案、full/clean 產物與 clean mp4 匯出狀態
-- 廣告緩解流程：可選「登入態錄影」最佳努力抓流 + 廣告段落偵測 + clean manifest / clean mp4 匯出
+- 查看最近錄好的影片檔案與可下載的乾淨影片
 
 ## 使用前要準備什麼
 
@@ -63,18 +62,6 @@ MAX_CONCURRENT_STREAMERS=3
 POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
 RECORDING_START_DELAY_SECONDS=25
-RECORDING_MODE=segment_native
-SEGMENT_AD_PADDING_SECONDS=2.0
-CLEAN_EXPORT_MAX_CONCURRENCY=1
-WATCHABLE_TRIM_START_SECONDS=0
-RECORDING_RAW_CONTAINER=ts
-DELETE_RAW_ON_SUCCESS=true
-TWITCH_API_BATCH_SIZE=100
-TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS=0.2
-TWITCH_API_MAX_RETRIES=3
-TWITCH_API_BASE_BACKOFF_SECONDS=0.5
-TWITCH_API_MAX_BACKOFF_SECONDS=8.0
-TWITCH_API_RETRY_JITTER_RATIO=0.2
 RECORDINGS_PATH=/recordings
 CONFIG_PATH=/config
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
@@ -84,18 +71,7 @@ ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 
 - `TWITCH_USER_OAUTH_TOKEN`：使用者 OAuth Token，用於「登入態錄影」以最佳努力降低廣告與開場等待畫面
 - `TWITCH_USER_LOGIN`：可選，通常填 Twitch 帳號 login；未填時系統會以 token 情境盡力處理
-- `RECORDING_START_DELAY_SECONDS`：主播開播後延遲幾秒才啟動錄影（預設 25 秒），用來避開開場 `Preparing your stream` 畫面，這是主方案
-- `WATCHABLE_TRIM_START_SECONDS`：watchable 檔案固定裁掉開頭秒數（預設 0 秒）；當主方案仍有殘留時再作為 fallback 調整（常見可設 `10~20`）
-- `RECORDING_MODE`：錄影產物模式，預設 `segment_native`（新流程）；可設 `legacy` 回到舊 watchable 後處理流程
-- `SEGMENT_AD_PADDING_SECONDS`：`segment_native` clean manifest 的廣告保守切除 padding 秒數（預設 `2.0`）
-- `CLEAN_EXPORT_MAX_CONCURRENCY`：clean mp4 匯出背景併發數（預設 `1`）
-- `RECORDING_RAW_CONTAINER`：原始錄影容器（預設 `ts`）；若要回到舊行為可改成 `mp4`
-- `DELETE_RAW_ON_SUCCESS`：僅 `legacy` 模式生效；watchable 成功後是否刪除原始檔（預設 `true`）
-- `TWITCH_API_BATCH_SIZE`：每次 Helix 查詢最多送多少個 login（上限 100）
-- `TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS`：每次 Twitch 請求之間最小間隔（秒）
-- `TWITCH_API_MAX_RETRIES`：429 / 5xx / 網路錯誤的最大重試次數
-- `TWITCH_API_BASE_BACKOFF_SECONDS` / `TWITCH_API_MAX_BACKOFF_SECONDS`：重試退避時間範圍
-- `TWITCH_API_RETRY_JITTER_RATIO`：重試抖動比例，避免固定節奏重打 API
+- `RECORDING_START_DELAY_SECONDS`：主播開播後延遲幾秒才啟動錄影（預設 25 秒）
 
 2. 啟動專案
 
@@ -116,7 +92,7 @@ docker compose up -d --build
 5. 如果主播開播，系統會先等待 `RECORDING_START_DELAY_SECONDS`，之後自動開始錄影
 6. 你也可以在直播卡片上手動按 `Start Recording` 或 `Stop Recording`
 7. 主播離線後，系統會依 `OFFLINE_GRACE_PERIOD_SECONDS` 保留寬限期再停止錄影
-8. 錄好的 segment、manifest、metadata 與（可選）clean mp4 匯出檔會存到專案資料夾
+8. 錄好的影片與相關資料會存到專案資料夾
 
 ## 管理畫面可以看到什麼
 
@@ -124,16 +100,14 @@ docker compose up -d --build
 - 監看名單：主播名稱與移除按鈕
 - 直播卡片：頭像、直播狀態、錄影狀態、標題、分類、觀看人數
 - 錄影細節：直播開始時間、最後檢查時間、離線時間、停止截止時間、輸出路徑、錯誤訊息
-- 錄影列表：最新 5 筆錄影的頻道、full/clean 下載按鈕、clean mp4 匯出狀態與下載按鈕
+- 錄影列表：最新 5 筆錄影的頻道、影片狀態與下載按鈕
 
 ## 錄好的影片會放在哪裡
 
 所有錄影資料都會存在專案根目錄對應的資料夾：
 
-- `recordings/<recording_id>/segments/segment_000000.ts`、`segment_000001.ts` ...：錄製中持續切段的原始 segment
-- `recordings/<recording_id>/manifests/full.m3u8`：完整 full manifest
-- `recordings/<recording_id>/manifests/clean.m3u8`：依廣告規則排除後的 clean manifest
-- `recordings/<recording_id>/exports/clean.mp4`：按需匯出的 clean mp4
+- `recordings/<recording_id>/`：單次錄影資料夾
+- `recordings/<recording_id>/exports/`：匯出的影片檔
 - `recordings/<recording_id>/recording.meta.json`：單次錄影 metadata
 - `config/streamers.json`：監看名單
 - `config/recordings.json`：錄影歷史索引
@@ -144,9 +118,6 @@ docker compose up -d --build
 - 有設定 `TWITCH_USER_OAUTH_TOKEN`：系統會先嘗試登入態抓流（best-effort），失敗時自動回退
 - 錄影中會從 `streamlink` 的輸出訊息偵測 ad break；`timed_id3` 只作候選訊號，需局部 OCR 確認後才會採信
 - `.meta.json` 會保留 `streamlink` 的 process `exit_code` 與最後 40 行 stderr，方便追查 `playlist ended`、`stream disconnected`、廣告切流等退出原因
-- `segment_native`（預設）：錄影完成後直接產出 full/clean manifest；clean mp4 為按需背景匯出
-- `legacy`：保留原先 watchable 後處理路徑，便於舊資料相容
-- 前端錄影列表目前顯示 clean 匯出狀態；`/recordings` API 與 `.meta.json` 仍保留相容欄位
 
 ## 常用指令
 
@@ -179,11 +150,3 @@ curl -X POST http://localhost:8000/refresh
 ```bash
 docker compose down
 ```
-
-
-## 已知限制與調校建議
-
-- 預設模式為 `segment_native`；若要使用舊版 watchable 後處理，請設 `RECORDING_MODE=legacy`
-- clean mp4 為按需匯出，非錄影結束即時生成；匯出狀態可在錄影列表查看
-- 若你要保留 raw 檔案做除錯，請設 `DELETE_RAW_ON_SUCCESS=false`
-- 若開場仍常錄到 `Preparing your stream`，優先調高 `RECORDING_START_DELAY_SECONDS`（主方案）；若只想讓可播放版本略過開頭，再調整 `WATCHABLE_TRIM_START_SECONDS`（fallback）

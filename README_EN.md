@@ -1,26 +1,29 @@
 # Twitch Recorder
 
+Chinese users: see [README.md](./README.md).
+
 ![Twitch Recorder Demo](./show_demo.png)
 
-Twitch Recorder helps you monitor Twitch channels and automatically start recording as soon as a streamer goes live, so you do not have to stay in front of your screen waiting for the stream to begin.
+This project helps you automatically monitor Twitch streamers and start recording as soon as they go live, so you do not have to keep checking stream schedules manually.
 
-This project is useful if you want to:
+It is useful for these situations:
 
-- Automatically save Twitch streams from specific channels
-- Follow multiple streamers at the same time
+- Automatically save streams from specific Twitch channels
+- Track multiple streamers at the same time
 - Manage your watch list from a browser
-- Avoid checking stream status manually
-- Keep streams that may be deleted later or locked behind subscriber-only VOD access
+- Avoid manually checking when a stream starts and pressing record yourself
+- Keep streams when VODs expire or are limited to subscribers
 
-## What It Does
+## What It Can Do
 
 - Add Twitch streamers you want to monitor
-- Check whether they are live automatically
-- Start recording as soon as a stream begins
-- Stop recording automatically when the stream ends
-- Show who is live and who is currently being recorded
-- List recorded video files
-- Ad-break mitigation pipeline: optional authenticated capture (best-effort) + ad detection + clean manifest / clean mp4 export
+- Remove streamers from the management dashboard
+- Automatically check whether a streamer is live
+- Wait a configurable number of seconds after a stream starts before recording, to avoid the opening `Preparing your stream`
+- Keep a short offline grace period before automatically stopping the recording
+- Manually start or stop recording while the stream is live
+- See who is currently live, who is being recorded, and the current recording status
+- View recently recorded files and downloadable clean video outputs
 
 ## What You Need Before Starting
 
@@ -29,26 +32,26 @@ This project is useful if you want to:
   - `TWITCH_CLIENT_ID`
   - `TWITCH_CLIENT_SECRET`
 
-You can think of these as the credentials that allow this app to request public stream information from Twitch. Without them, the app cannot check live status or fetch channel details.
+You can think of these as the credentials that allow this tool to request public stream information from Twitch. Without them, the system does not know which Twitch application it should use to fetch data.
 
-If you do not have them yet, you can get them like this:
+If you do not have them yet, you can apply for them like this:
 
-1. Sign in to your Twitch account.
-2. Open the Twitch Developer Console.
-3. Create a new application.
-4. After the application is created, copy the `Client ID`.
-5. Generate a `Client Secret`.
-6. Paste both values into your `.env` file.
+1. Sign in to your Twitch account
+2. Open the Twitch Developer Console
+3. Create a new application
+4. After it is created, copy the `Client ID`
+5. Click the button to generate a new `Client Secret`
+6. Put both values into the matching fields in `.env`
 
 ![Twitch API Setup](./twitch_api.png)
 
-If Twitch asks for an `OAuth Redirect URL`, you can use a local address such as `http://localhost`. This project only needs app credentials to query stream information, so you do not need a complex login flow.
+If the application form asks for an `OAuth Redirect URL`, you can enter a local address such as `http://localhost`. This project mainly uses the credentials to query stream information, so it does not require a complex login flow.
 
 ## Quick Start
 
-1. Create a `.env` file in the project root.
+1. Create a `.env` file in the project root
 
-Put the following values in it:
+Put the following content into it:
 
 ```env
 TWITCH_CLIENT_ID=your_client_id
@@ -59,82 +62,62 @@ MAX_CONCURRENT_STREAMERS=3
 POLL_INTERVAL_SECONDS=30
 OFFLINE_GRACE_PERIOD_SECONDS=20
 RECORDING_START_DELAY_SECONDS=25
-RECORDING_MODE=segment_native
-SEGMENT_AD_PADDING_SECONDS=2.0
-CLEAN_EXPORT_MAX_CONCURRENCY=1
-WATCHABLE_TRIM_START_SECONDS=0
-TWITCH_API_BATCH_SIZE=100
-TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS=0.2
-TWITCH_API_MAX_RETRIES=3
-TWITCH_API_BASE_BACKOFF_SECONDS=0.5
-TWITCH_API_MAX_BACKOFF_SECONDS=8.0
-TWITCH_API_RETRY_JITTER_RATIO=0.2
 RECORDINGS_PATH=/recordings
 CONFIG_PATH=/config
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ```
 
-Optional values (safe to leave empty):
+Optional values (the project still works if you leave them empty):
 
-- `TWITCH_USER_OAUTH_TOKEN`: user OAuth token for authenticated recording mode to best-effort reduce ads and "prepare your stream" delays
-- `TWITCH_USER_LOGIN`: optional Twitch login name tied to the token; if omitted, the app still runs in best-effort mode
-- `RECORDING_START_DELAY_SECONDS`: delay recording start after stream goes live (default: 25s) to avoid initial `Preparing your stream` segments; this is the primary mitigation
-- `RECORDING_MODE`: recording artifact mode; default is `segment_native` (new flow). Set `legacy` to keep the old watchable-finalize flow
-- `SEGMENT_AD_PADDING_SECONDS`: conservative ad-cut padding for clean manifest generation in `segment_native` mode (default: `2.0`)
-- `CLEAN_EXPORT_MAX_CONCURRENCY`: max concurrent clean mp4 export workers (default: `1`)
-- `WATCHABLE_TRIM_START_SECONDS`: fixed number of seconds to trim from the beginning of watchable output (default: 0); use this as a fallback only if the primary start-delay mitigation is still insufficient (common range: `10~20`)
-- `TWITCH_API_BATCH_SIZE`: maximum login names per Helix request (hard cap: 100)
-- `TWITCH_API_MIN_REQUEST_INTERVAL_SECONDS`: minimum gap between Twitch API requests
-- `TWITCH_API_MAX_RETRIES`: retry count for 429 / 5xx / transient network failures
-- `TWITCH_API_BASE_BACKOFF_SECONDS` / `TWITCH_API_MAX_BACKOFF_SECONDS`: exponential backoff window
-- `TWITCH_API_RETRY_JITTER_RATIO`: random jitter ratio to avoid synchronized retry bursts
+- `TWITCH_USER_OAUTH_TOKEN`: user OAuth token used for authenticated capture to best-effort reduce ads and opening wait screens
+- `TWITCH_USER_LOGIN`: optional Twitch account login; if omitted, the system still tries to operate in the token scenario as best it can
+- `RECORDING_START_DELAY_SECONDS`: how many seconds to wait after a streamer goes live before starting recording (default: 25 seconds)
 
-2. Start the project:
+2. Start the project
 
 ```bash
 docker compose up -d --build
 ```
 
-3. Open your browser:
+3. Open your browser
 
 - Dashboard: `http://localhost:3000`
 
-## How To Use It
+## Daily Usage
 
-1. Open the dashboard.
-2. Enter the Twitch channel name you want to monitor.
-3. Click the add button.
-4. The app will keep checking whether the streamer is live.
-5. When the stream starts, recording starts automatically.
-6. Recorded segments/manifests (and optional clean mp4 exports) are saved in the `recordings/` folder.
+1. Open the dashboard
+2. Enter the Twitch streamer name you want to monitor
+3. Click add, and the streamer will be saved to the watch list
+4. The system refreshes stream status automatically based on `POLL_INTERVAL_SECONDS`
+5. If the streamer goes live, the system waits for `RECORDING_START_DELAY_SECONDS` and then starts recording automatically
+6. You can also click `Start Recording` or `Stop Recording` manually on the live stream card
+7. After the streamer goes offline, the system keeps the recording alive for `OFFLINE_GRACE_PERIOD_SECONDS` before stopping
+8. Recorded files and related data are saved in the project folders
 
-## What You Will See On The Dashboard
+## What You Can See On The Dashboard
 
-- Whether the streamer is currently live
-- Stream title
-- Game or category
-- Viewer count
-- Whether recording is in progress
-- Recording start time
-- Output file path
+- Header summary: how many channels are recording, live, and being monitored
+- Watch list: streamer names and remove buttons
+- Live cards: avatar, live status, recording status, title, category, viewer count
+- Recording details: stream start time, last check time, offline time, stop deadline, output path, error message
+- Recording list: the latest 5 recordings with channel name, file status, and download buttons
 
-## Where Recordings Are Saved
+## Where Recorded Files Are Stored
 
-Default `segment_native` mode writes:
+All recording data is stored under folders in the project root:
 
-- `recordings/<recording_id>/segments/segment_000000.ts`, `segment_000001.ts`, ...
-- `recordings/<recording_id>/manifests/full.m3u8`
-- `recordings/<recording_id>/manifests/clean.m3u8`
-- `recordings/<recording_id>/exports/clean.mp4` (on-demand export)
-- `recordings/<recording_id>/recording.meta.json`
+- `recordings/<recording_id>/`: one recording session directory
+- `recordings/<recording_id>/exports/`: exported video files
+- `recordings/<recording_id>/recording.meta.json`: metadata for one recording session
+- `config/streamers.json`: monitored streamer list
+- `config/recordings.json`: recording history index
 
-## Ad-Break Mitigation (Hybrid Mode)
+## Ad Mitigation (Hybrid Mode)
 
-- Without user auth token: recording runs in normal public mode
-- With `TWITCH_USER_OAUTH_TOKEN`: recorder first attempts authenticated capture (best-effort), then automatically falls back if needed
-- Recorder events are treated as high-confidence ad signals; `timed_id3` is only a candidate and must be confirmed by localized OCR before being used as an ad cut
-- Watchable output now prefers fast paths (remux / trim-copy) when no high-confidence ad windows are present; segment transcode is used only when ad windows are confirmed
-- The recordings list (API and dashboard) includes full/clean artifact paths, clean export status, and ad break count
+- Without a user token: recording uses the normal public mode
+- With `TWITCH_USER_OAUTH_TOKEN`: the system first tries authenticated capture (best-effort) and falls back automatically if it fails
+- While recording, the system detects ad breaks from `streamlink` output; `timed_id3` is treated only as a candidate signal and must be confirmed by localized OCR before it is trusted
+- `.meta.json` keeps the `streamlink` process `exit_code` and the last 40 lines of stderr so you can trace reasons such as `playlist ended`, `stream disconnected`, or ad-triggered stream switching
 
 ## Common Commands
 
@@ -144,10 +127,22 @@ Start:
 docker compose up -d --build
 ```
 
-Check logs:
+Check running containers:
 
 ```bash
-docker compose logs -f
+docker compose ps
+```
+
+View backend logs:
+
+```bash
+docker compose logs -f backend
+```
+
+Manually refresh container state:
+
+```bash
+curl -X POST http://localhost:8000/refresh
 ```
 
 Stop:
