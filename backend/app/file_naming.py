@@ -7,14 +7,12 @@ def build_recording_output_filename(
     *,
     channel: str,
     started_at: datetime,
-    ended_at: datetime,
     extension: str,
 ) -> str:
     normalized_channel = str(channel or "recording").strip().lower() or "recording"
     normalized_extension = str(extension or "").strip().lstrip(".").lower() or "ts"
     started = _normalize_timestamp(started_at)
-    ended = _normalize_timestamp(ended_at)
-    return f"{normalized_channel}_{started}_{ended}.{normalized_extension}"
+    return f"{normalized_channel}_{started}.{normalized_extension}"
 
 
 def parse_recording_timestamp(value: str | None) -> datetime | None:

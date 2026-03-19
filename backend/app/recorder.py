@@ -849,7 +849,6 @@ class RecorderManager:
                 / build_recording_output_filename(
                     channel=recording.channel,
                     started_at=recording.started_at,
-                    ended_at=ended_at,
                     extension="ts",
                 )
             )
@@ -1180,7 +1179,6 @@ class RecorderManager:
         compact_output_path = recording.recording_root / "exports" / build_recording_output_filename(
             channel=recording.channel,
             started_at=recording.started_at,
-            ended_at=ended_at,
             extension="ts",
         )
         compact_output_path.parent.mkdir(parents=True, exist_ok=True)
