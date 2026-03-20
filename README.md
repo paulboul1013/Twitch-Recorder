@@ -2,7 +2,7 @@
 
 English users: see [README_EN.md](./README_EN.md).
 
-![Twitch Recorder 展示畫面](./show_demo.png)
+![Twitch Recorder 展示畫面](./docs/readme/show_demo.png)
 
 這個專案可以幫你自動監看 Twitch 主播，只要對方一開播，就自動開始錄影，讓你不用一直自己盯著直播時間。
 
@@ -43,7 +43,7 @@ English users: see [README_EN.md](./README_EN.md).
 5. 接著再按新密碼按鈕，產生 `Client Secret`(用戶名端密碼)
 6. 把這兩個值填進 `.env` 裡對應的位置
 
-![Twitch API 設定畫面](./twitch_api.png)
+![Twitch API 設定畫面](./docs/readme/twitch_api.png)
 
 如果申請頁面要求填 `OAuth Redirect URL`，你可以先填一個本機網址，例如 `http://localhost`。這個專案主要是拿來查直播資訊，不需要做複雜登入流程。
 

@@ -2,7 +2,7 @@
 
 Chinese users: see [README.md](./README.md).
 
-![Twitch Recorder Demo](./show_demo.png)
+![Twitch Recorder Demo](./docs/readme/show_demo.png)
 
 This project helps you automatically monitor Twitch streamers and start recording as soon as they go live, so you do not have to keep checking stream schedules manually.
 
@@ -43,7 +43,7 @@ If you do not have them yet, you can apply for them like this:
 5. Click the button to generate a new `Client Secret`
 6. Put both values into the matching fields in `.env`
 
-![Twitch API Setup](./twitch_api.png)
+![Twitch API Setup](./docs/readme/twitch_api.png)
 
 If the application form asks for an `OAuth Redirect URL`, you can enter a local address such as `http://localhost`. This project mainly uses the credentials to query stream information, so it does not require a complex login flow.
 
