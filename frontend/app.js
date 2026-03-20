@@ -10,6 +10,7 @@ const state = {
   recordingsFollowupTimerId: null,
   refreshInFlight: false,
   statusCarouselIndex: 0,
+  statusFocusName: null,
 };
 
 const elements = {
@@ -362,7 +363,16 @@ function renderStatuses(statuses) {
 
   if (!statuses.length) {
     state.statusCarouselIndex = 0;
+    state.statusFocusName = null;
     return;
+  }
+
+  if (state.statusFocusName) {
+    const focusedIndex = statuses.findIndex((status) => status.name === state.statusFocusName);
+    if (focusedIndex >= 0) {
+      state.statusCarouselIndex = focusedIndex;
+    }
+    state.statusFocusName = null;
   }
 
   state.statusCarouselIndex = Math.max(0, Math.min(state.statusCarouselIndex, statuses.length - 1));
@@ -718,16 +728,19 @@ elements.streamerForm.addEventListener("submit", async (event) => {
   if (!name) {
     return;
   }
+  const normalizedName = name.toLowerCase();
 
   try {
     await request("/streamers", {
       method: "POST",
       body: JSON.stringify({ name }),
     });
+    state.statusFocusName = normalizedName;
     elements.streamerName.value = "";
     showToast(`Added ${name}`);
     await refreshAllData();
   } catch (error) {
+    state.statusFocusName = null;
     showToast(error.message);
   }
 });
