@@ -33,6 +33,79 @@ def test_add_list_and_delete_streamers(tmp_path: Path) -> None:
         assert listed_again.json() == []
 
 
+def test_streamer_recording_directories_endpoint_lists_only_deletable_segment_native_dirs(
+    tmp_path: Path,
+) -> None:
+    with build_test_client(tmp_path) as client:
+        alpha_root = tmp_path / "recordings" / "alpha"
+        deletable_root = alpha_root / "alpha_20260320_120000_000001"
+        processing_root = alpha_root / "alpha_20260320_121000_000002"
+        legacy_source = tmp_path / "recordings" / "alpha_legacy_20260320_122000.ts"
+        other_root = tmp_path / "recordings" / "bravo" / "bravo_20260320_120000_000003"
+
+        for recording_root in (deletable_root, processing_root, other_root):
+            (recording_root / "segments").mkdir(parents=True, exist_ok=True)
+            (recording_root / "segments" / "segment_000000.ts").write_bytes(b"video-data")
+
+        legacy_source.parent.mkdir(parents=True, exist_ok=True)
+        legacy_source.write_bytes(b"legacy-data")
+
+        client.post("/streamers", json={"name": "alpha"})
+
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.save(
+            [
+                TrackedRecording(
+                    channel="alpha",
+                    source_file_path=str(deletable_root / "segments" / "segment_000000.ts"),
+                    recording_id="rec-delete-ok",
+                    artifact_mode="segment_native",
+                    started_at="2026-03-20T12:00:00+00:00",
+                    ended_at="2026-03-20T12:05:00+00:00",
+                ),
+                TrackedRecording(
+                    channel="alpha",
+                    source_file_path=str(processing_root / "segments" / "segment_000000.ts"),
+                    recording_id="rec-processing",
+                    artifact_mode="segment_native",
+                    clean_compact_state="processing",
+                    started_at="2026-03-20T12:10:00+00:00",
+                    ended_at="2026-03-20T12:15:00+00:00",
+                ),
+                TrackedRecording(
+                    channel="alpha",
+                    source_file_path=str(legacy_source),
+                    recording_id="rec-legacy",
+                    artifact_mode="legacy",
+                    started_at="2026-03-20T12:20:00+00:00",
+                    ended_at="2026-03-20T12:25:00+00:00",
+                ),
+                TrackedRecording(
+                    channel="bravo",
+                    source_file_path=str(other_root / "segments" / "segment_000000.ts"),
+                    recording_id="rec-other",
+                    artifact_mode="segment_native",
+                    started_at="2026-03-20T12:30:00+00:00",
+                    ended_at="2026-03-20T12:35:00+00:00",
+                ),
+            ]
+        )
+
+        response = client.get("/streamers/alpha/recording-directories")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload == [
+            {
+                "recording_id": "rec-delete-ok",
+                "channel": "alpha",
+                "directory_name": "alpha_20260320_120000_000001",
+                "started_at": "2026-03-20T12:00:00+00:00",
+                "ended_at": "2026-03-20T12:05:00+00:00",
+                "modified_at": payload[0]["modified_at"],
+            }
+        ]
+
+
 def test_recordings_endpoint_lists_saved_files(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         recordings_dir = tmp_path / "recordings"
@@ -213,6 +286,96 @@ def test_recordings_endpoint_lists_active_recording_with_current_file_size(tmp_p
             autospec=True,
         ):
             service.recorder.stop_all(wait_for_finalize=True)
+
+
+def test_streamer_recording_directories_delete_endpoint_removes_dirs_and_store_entries(
+    tmp_path: Path,
+) -> None:
+    with build_test_client(tmp_path) as client:
+        alpha_root = tmp_path / "recordings" / "alpha"
+        delete_root = alpha_root / "alpha_20260320_120000_000001"
+        keep_root = alpha_root / "alpha_20260320_121000_000002"
+
+        for recording_root in (delete_root, keep_root):
+            (recording_root / "segments").mkdir(parents=True, exist_ok=True)
+            (recording_root / "segments" / "segment_000000.ts").write_bytes(b"video-data")
+
+        client.post("/streamers", json={"name": "alpha"})
+
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.save(
+            [
+                TrackedRecording(
+                    channel="alpha",
+                    source_file_path=str(delete_root / "segments" / "segment_000000.ts"),
+                    recording_id="rec-delete-me",
+                    artifact_mode="segment_native",
+                ),
+                TrackedRecording(
+                    channel="alpha",
+                    source_file_path=str(keep_root / "segments" / "segment_000000.ts"),
+                    recording_id="rec-keep-me",
+                    artifact_mode="segment_native",
+                ),
+            ]
+        )
+
+        response = client.post(
+            "/streamers/alpha/recording-directories/delete",
+            json={"recording_ids": ["rec-delete-me"]},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "channel": "alpha",
+            "deleted_recording_ids": ["rec-delete-me"],
+            "deleted_directory_names": ["alpha_20260320_120000_000001"],
+        }
+        assert delete_root.exists() is False
+        assert keep_root.exists() is True
+
+        remaining_ids = [tracked.recording_id for tracked in service.recording_store.load()]
+        assert remaining_ids == ["rec-keep-me"]
+
+        second_response = client.post(
+            "/streamers/alpha/recording-directories/delete",
+            json={"recording_ids": ["rec-keep-me"]},
+        )
+        assert second_response.status_code == 200
+        assert alpha_root.exists() is False
+
+
+def test_streamer_recording_directories_delete_endpoint_rejects_processing_directories(
+    tmp_path: Path,
+) -> None:
+    with build_test_client(tmp_path) as client:
+        alpha_root = tmp_path / "recordings" / "alpha"
+        processing_root = alpha_root / "alpha_20260320_120000_000001"
+        (processing_root / "segments").mkdir(parents=True, exist_ok=True)
+        (processing_root / "segments" / "segment_000000.ts").write_bytes(b"video-data")
+
+        client.post("/streamers", json={"name": "alpha"})
+
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.save(
+            [
+                TrackedRecording(
+                    channel="alpha",
+                    source_file_path=str(processing_root / "segments" / "segment_000000.ts"),
+                    recording_id="rec-processing",
+                    artifact_mode="segment_native",
+                    clean_compact_state="processing",
+                )
+            ]
+        )
+
+        response = client.post(
+            "/streamers/alpha/recording-directories/delete",
+            json={"recording_ids": ["rec-processing"]},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == "one or more recording directories are still processing"
+        assert processing_root.exists() is True
+        assert [tracked.recording_id for tracked in service.recording_store.load()] == ["rec-processing"]
 
 
 def test_segment_native_download_and_export_status_endpoints(tmp_path: Path) -> None:

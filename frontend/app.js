@@ -11,6 +11,12 @@ const state = {
   refreshInFlight: false,
   statusCarouselIndex: 0,
   statusFocusName: null,
+  streamers: [],
+  expandedStreamerName: null,
+  streamerDirectoryEntriesByName: {},
+  streamerDirectorySelectionsByName: {},
+  streamerDirectoryLoadingName: null,
+  streamerDirectoryDeletingName: null,
 };
 
 const elements = {
@@ -324,18 +330,119 @@ function shiftStatusCarousel(statuses, step) {
   renderStatuses(statuses);
 }
 
+function getStreamerDirectorySelections(name) {
+  return state.streamerDirectorySelectionsByName[name] || [];
+}
+
+function setStreamerDirectorySelection(name, recordingId, isSelected) {
+  const currentSelections = new Set(getStreamerDirectorySelections(name));
+  if (isSelected) {
+    currentSelections.add(recordingId);
+  } else {
+    currentSelections.delete(recordingId);
+  }
+  state.streamerDirectorySelectionsByName[name] = Array.from(currentSelections);
+}
+
+async function loadStreamerRecordingDirectories(name) {
+  state.streamerDirectoryLoadingName = name;
+  renderStreamers(state.streamers);
+  try {
+    const directories = await request(`/streamers/${encodeURIComponent(name)}/recording-directories`);
+    state.streamerDirectoryEntriesByName[name] = directories;
+  } finally {
+    state.streamerDirectoryLoadingName = null;
+  }
+}
+
+async function toggleStreamerDirectoryPanel(name) {
+  if (state.expandedStreamerName === name) {
+    state.expandedStreamerName = null;
+    delete state.streamerDirectorySelectionsByName[name];
+    renderStreamers(state.streamers);
+    return;
+  }
+
+  state.expandedStreamerName = name;
+  delete state.streamerDirectorySelectionsByName[name];
+  renderStreamers(state.streamers);
+
+  try {
+    await loadStreamerRecordingDirectories(name);
+    renderStreamers(state.streamers);
+  } catch (error) {
+    state.expandedStreamerName = null;
+    renderStreamers(state.streamers);
+    showToast(error.message);
+  }
+}
+
+async function deleteStreamerRecordingDirectories(name) {
+  const selectedIds = getStreamerDirectorySelections(name);
+  if (!selectedIds.length) {
+    return;
+  }
+  const confirmed = window.confirm(
+    `Delete ${selectedIds.length} recording director${selectedIds.length === 1 ? "y" : "ies"} for ${name}?`,
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  state.streamerDirectoryDeletingName = name;
+  renderStreamers(state.streamers);
+  try {
+    const result = await request(`/streamers/${encodeURIComponent(name)}/recording-directories/delete`, {
+      method: "POST",
+      body: JSON.stringify({ recording_ids: selectedIds }),
+    });
+    delete state.streamerDirectorySelectionsByName[name];
+    delete state.streamerDirectoryEntriesByName[name];
+    showToast(`Deleted ${result.deleted_recording_ids.length} recording directories for ${name}`);
+    await Promise.all([refreshStreamers(), refreshRecordings()]);
+    if (state.expandedStreamerName === name) {
+      await loadStreamerRecordingDirectories(name);
+      renderStreamers(state.streamers);
+    }
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    state.streamerDirectoryDeletingName = null;
+    renderStreamers(state.streamers);
+  }
+}
+
 function renderStreamers(streamers) {
   elements.streamerCount.textContent = String(streamers.length);
   elements.streamersList.replaceChildren();
   elements.streamersEmpty.hidden = streamers.length > 0;
 
+  if (state.expandedStreamerName && !streamers.some((streamer) => streamer.name === state.expandedStreamerName)) {
+    state.expandedStreamerName = null;
+  }
+
   for (const streamer of streamers) {
     const item = document.createElement("li");
     item.className = "list-item";
 
-    const label = document.createElement("span");
-    label.className = "channel";
-    label.textContent = streamer.name;
+    const content = document.createElement("div");
+    content.className = "streamer-item-content";
+
+    const topRow = document.createElement("div");
+    topRow.className = "streamer-item-top";
+
+    const labelButton = document.createElement("button");
+    labelButton.className = "streamer-name-button";
+    labelButton.type = "button";
+    labelButton.textContent = streamer.name;
+    labelButton.setAttribute("aria-expanded", String(state.expandedStreamerName === streamer.name));
+    labelButton.addEventListener("click", async () => {
+      try {
+        await toggleStreamerDirectoryPanel(streamer.name);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
 
     const removeButton = document.createElement("button");
     removeButton.className = "secondary";
@@ -350,7 +457,80 @@ function renderStreamers(streamers) {
       }
     });
 
-    item.append(label, removeButton);
+    topRow.append(labelButton, removeButton);
+    content.append(topRow);
+
+    if (state.expandedStreamerName === streamer.name) {
+      const directoriesPanel = document.createElement("div");
+      directoriesPanel.className = "streamer-directories";
+
+      if (state.streamerDirectoryLoadingName === streamer.name) {
+        const loadingState = document.createElement("div");
+        loadingState.className = "recording-meta";
+        loadingState.textContent = "Loading recording directories...";
+        directoriesPanel.append(loadingState);
+      } else {
+        const directories = state.streamerDirectoryEntriesByName[streamer.name] || [];
+        if (!directories.length) {
+          const emptyState = document.createElement("div");
+          emptyState.className = "streamer-directories-empty";
+          emptyState.textContent = "No deletable recordings for this streamer.";
+          directoriesPanel.append(emptyState);
+        } else {
+          const selectionList = document.createElement("div");
+          selectionList.className = "streamer-directory-list";
+
+          for (const directory of directories) {
+            const entry = document.createElement("label");
+            entry.className = "streamer-directory-item";
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.checked = getStreamerDirectorySelections(streamer.name).includes(directory.recording_id);
+            checkbox.addEventListener("change", () => {
+              setStreamerDirectorySelection(streamer.name, directory.recording_id, checkbox.checked);
+              renderStreamers(state.streamers);
+            });
+
+            const entryText = document.createElement("div");
+            entryText.className = "streamer-directory-copy";
+
+            const entryName = document.createElement("div");
+            entryName.className = "channel";
+            entryName.textContent = directory.directory_name;
+
+            const entryMeta = document.createElement("div");
+            entryMeta.className = "recording-meta";
+            entryMeta.textContent = `Ended ${formatDate(directory.ended_at || directory.modified_at)}`;
+
+            entryText.append(entryName, entryMeta);
+            entry.append(checkbox, entryText);
+            selectionList.append(entry);
+          }
+
+          const deleteButton = document.createElement("button");
+          deleteButton.className = "danger streamer-directory-delete";
+          deleteButton.type = "button";
+          deleteButton.textContent = (
+            state.streamerDirectoryDeletingName === streamer.name
+              ? "Deleting..."
+              : "Delete Selected"
+          );
+          deleteButton.disabled = (
+            state.streamerDirectoryDeletingName === streamer.name
+            || getStreamerDirectorySelections(streamer.name).length === 0
+          );
+          deleteButton.addEventListener("click", async () => {
+            await deleteStreamerRecordingDirectories(streamer.name);
+          });
+
+          directoriesPanel.append(selectionList, deleteButton);
+        }
+      }
+      content.append(directoriesPanel);
+    }
+
+    item.append(content);
     elements.streamersList.append(item);
   }
 }
@@ -649,6 +829,7 @@ function renderRecordings(recordings) {
 
 async function refreshStreamers() {
   const streamers = await request("/streamers");
+  state.streamers = streamers;
   elements.summaryMonitored.textContent = String(streamers.length);
   renderStreamers(streamers);
 }

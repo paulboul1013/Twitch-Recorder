@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,8 @@ from .config import Settings
 from .file_naming import build_recording_output_filename, parse_recording_timestamp
 from .models import (
     CleanExportStatusResponse,
+    RecordingDirectoryDeleteResponse,
+    RecordingDirectoryInfo,
     RecordingInfo,
     StartRecordingResponse,
     StopRecordingResponse,
@@ -283,6 +286,136 @@ class MonitorService:
             self.store.save(self._streamers)
             self._statuses.pop(normalized, None)
             self._manually_stopped.discard(normalized)
+
+    def _resolve_streamer_recording_root(self, tracked: TrackedRecording) -> Path:
+        source_path = Path(tracked.source_file_path)
+        return source_path.parent.parent
+
+    def _is_streamer_recording_deletable(
+        self,
+        tracked: TrackedRecording,
+        *,
+        channel: str,
+        active_recording_ids: set[str],
+    ) -> bool:
+        if tracked.channel != channel or tracked.artifact_mode != "segment_native":
+            return False
+        if tracked.recording_id in active_recording_ids:
+            return False
+        if str(tracked.state or "").strip().lower() == "recording":
+            return False
+        if tracked.clean_compact_state in {"queued", "processing"}:
+            return False
+        if tracked.clean_export_state in {"queued", "processing"}:
+            return False
+        recording_root = self._resolve_streamer_recording_root(tracked)
+        return recording_root.exists() and recording_root.is_dir()
+
+    async def list_streamer_recording_directories(self, name: str) -> list[RecordingDirectoryInfo]:
+        normalized = name.strip().lower()
+        await self._sync_finished_recordings()
+        tracked_recordings = self.recording_store.load()
+        async with self._recorder_lock:
+            active_recording_ids = {
+                str(snapshot.get("recording_id", "")).strip()
+                for snapshot in self.recorder.list_active_recordings()
+                if str(snapshot.get("recording_id", "")).strip()
+            }
+
+        directories: list[RecordingDirectoryInfo] = []
+        for tracked in tracked_recordings:
+            if not self._is_streamer_recording_deletable(
+                tracked,
+                channel=normalized,
+                active_recording_ids=active_recording_ids,
+            ):
+                continue
+            recording_root = self._resolve_streamer_recording_root(tracked)
+            started_at = parse_recording_timestamp(tracked.started_at)
+            ended_at = parse_recording_timestamp(tracked.ended_at)
+            try:
+                modified_at = datetime.fromtimestamp(recording_root.stat().st_mtime, tz=UTC)
+            except OSError:
+                continue
+            directories.append(
+                RecordingDirectoryInfo(
+                    recording_id=tracked.recording_id,
+                    channel=normalized,
+                    directory_name=recording_root.name,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    modified_at=modified_at,
+                )
+            )
+
+        directories.sort(key=lambda item: item.modified_at, reverse=True)
+        return directories
+
+    async def delete_streamer_recording_directories(
+        self,
+        name: str,
+        recording_ids: list[str],
+    ) -> RecordingDirectoryDeleteResponse:
+        normalized = name.strip().lower()
+        unique_recording_ids = list(dict.fromkeys(str(value).strip() for value in recording_ids if str(value).strip()))
+        if not unique_recording_ids:
+            raise ValueError("recording_ids must not be empty")
+
+        await self._sync_finished_recordings()
+        async with self._lock:
+            tracked_recordings = self.recording_store.load()
+            tracked_by_id = {tracked.recording_id: tracked for tracked in tracked_recordings}
+            async with self._recorder_lock:
+                active_recording_ids = {
+                    str(snapshot.get("recording_id", "")).strip()
+                    for snapshot in self.recorder.list_active_recordings()
+                    if str(snapshot.get("recording_id", "")).strip()
+                }
+
+            selected: list[tuple[TrackedRecording, Path]] = []
+            channel_root = (self.settings.recordings_path / normalized).resolve()
+            for recording_id in unique_recording_ids:
+                tracked = tracked_by_id.get(recording_id)
+                if tracked is None or tracked.channel != normalized:
+                    raise ValueError("one or more recording directories are invalid")
+                if tracked.artifact_mode != "segment_native":
+                    raise ValueError("legacy recordings are not supported by directory deletion")
+                if tracked.recording_id in active_recording_ids:
+                    raise ValueError("one or more recording directories are still recording")
+                if tracked.clean_compact_state in {"queued", "processing"}:
+                    raise ValueError("one or more recording directories are still processing")
+                if tracked.clean_export_state in {"queued", "processing"}:
+                    raise ValueError("one or more recording directories are still exporting")
+
+                recording_root = self._resolve_streamer_recording_root(tracked)
+                resolved_root = recording_root.resolve()
+                if not resolved_root.is_relative_to(channel_root):
+                    raise ValueError("one or more recording directories are outside the channel directory")
+                selected.append((tracked, recording_root))
+
+            deleted_directory_names: list[str] = []
+            selected_ids = {tracked.recording_id for tracked, _ in selected}
+            for _tracked, recording_root in selected:
+                deleted_directory_names.append(recording_root.name)
+                if recording_root.exists():
+                    shutil.rmtree(recording_root)
+
+            remaining_recordings = [
+                tracked for tracked in tracked_recordings if tracked.recording_id not in selected_ids
+            ]
+            self.recording_store.save(remaining_recordings)
+
+            if channel_root.exists() and channel_root.is_dir():
+                try:
+                    next(channel_root.iterdir())
+                except StopIteration:
+                    channel_root.rmdir()
+
+        return RecordingDirectoryDeleteResponse(
+            channel=normalized,
+            deleted_recording_ids=unique_recording_ids,
+            deleted_directory_names=deleted_directory_names,
+        )
 
     async def stop_streamer_recording(self, name: str) -> StopRecordingResponse:
         normalized = name.strip().lower()

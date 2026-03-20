@@ -241,11 +241,87 @@ input {
 }
 
 .list-item {
+  padding: 14px 16px;
+}
+
+.streamer-item-content {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+}
+
+.streamer-item-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.streamer-name-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.95rem;
+}
+
+.streamer-name-button:hover {
+  transform: none;
+  background: transparent;
+  color: var(--brand);
+}
+
+.streamer-name-button:focus-visible {
+  outline: 2px solid rgba(159, 63, 36, 0.28);
+  outline-offset: 4px;
+}
+
+.streamer-directories {
+  display: grid;
   padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 250, 241, 0.68);
+  border-radius: 14px;
+}
+
+.streamer-directory-list {
+  display: grid;
+  gap: 10px;
+}
+
+.streamer-directory-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.streamer-directory-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+
+.streamer-directory-copy {
+  min-width: 0;
+}
+
+.streamer-directories-empty {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.streamer-directory-delete {
+  justify-self: flex-start;
 }
 
 .channel {

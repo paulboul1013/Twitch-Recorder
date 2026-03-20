@@ -13,6 +13,25 @@ class StreamerInfo(BaseModel):
     name: str
 
 
+class RecordingDirectoryInfo(BaseModel):
+    recording_id: str
+    channel: str
+    directory_name: str
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    modified_at: datetime
+
+
+class RecordingDirectoryDeleteRequest(BaseModel):
+    recording_ids: list[str]
+
+
+class RecordingDirectoryDeleteResponse(BaseModel):
+    channel: str
+    deleted_recording_ids: list[str]
+    deleted_directory_names: list[str]
+
+
 class StreamStatus(BaseModel):
     name: str
     profile_image_url: str | None = None

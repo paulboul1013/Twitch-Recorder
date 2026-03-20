@@ -10,6 +10,9 @@ from .config import Settings
 from .models import (
     CleanExportStatusResponse,
     HealthResponse,
+    RecordingDirectoryDeleteRequest,
+    RecordingDirectoryDeleteResponse,
+    RecordingDirectoryInfo,
     RecordingInfo,
     StartRecordingResponse,
     StopRecordingResponse,
@@ -102,6 +105,37 @@ def create_app(service: MonitorService | None = None, enable_background: bool = 
         monitor_service: MonitorService = Depends(get_service),
     ) -> StreamerInfo:
         return await monitor_service.add_streamer(payload.name)
+
+    @app.get(
+        "/streamers/{name}/recording-directories",
+        response_model=list[RecordingDirectoryInfo],
+    )
+    async def list_streamer_recording_directories(
+        name: str,
+        monitor_service: MonitorService = Depends(get_service),
+    ) -> list[RecordingDirectoryInfo]:
+        if not any(streamer.name == name.lower() for streamer in monitor_service.list_streamers()):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="streamer not found")
+        return await monitor_service.list_streamer_recording_directories(name)
+
+    @app.post(
+        "/streamers/{name}/recording-directories/delete",
+        response_model=RecordingDirectoryDeleteResponse,
+    )
+    async def delete_streamer_recording_directories(
+        name: str,
+        payload: RecordingDirectoryDeleteRequest,
+        monitor_service: MonitorService = Depends(get_service),
+    ) -> RecordingDirectoryDeleteResponse:
+        if not any(streamer.name == name.lower() for streamer in monitor_service.list_streamers()):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="streamer not found")
+        try:
+            return await monitor_service.delete_streamer_recording_directories(
+                name,
+                payload.recording_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     @app.delete("/streamers/{name}", status_code=status.HTTP_204_NO_CONTENT)
     async def remove_streamer(
