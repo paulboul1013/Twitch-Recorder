@@ -99,6 +99,31 @@ def test_metadata_pending_state_has_new_watchable_fields(tmp_path: Path) -> None
     assert metadata["clean_compact_error"] is None
 
 
+def test_start_recording_groups_legacy_outputs_under_channel_directory(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",))
+
+    with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()):
+        output_path = Path(recorder.start_recording("alpha"))
+
+    assert output_path.parent == tmp_path / "alpha"
+    assert output_path.name.startswith("alpha_")
+    assert output_path.with_suffix(".meta.json").parent == tmp_path / "alpha"
+
+
+def test_start_recording_groups_segment_native_outputs_under_channel_directory(tmp_path: Path) -> None:
+    recorder = RecorderManager(tmp_path, ("best",), recording_mode="segment_native")
+
+    with patch("app.recorder.subprocess.Popen", side_effect=[FakeProcess(), FakeProcess()]):
+        output_path = Path(recorder.start_recording("alpha"))
+
+    recording_root = output_path.parent.parent
+    assert recording_root.parent == tmp_path / "alpha"
+    assert output_path.parent == recording_root / "segments"
+    assert (recording_root / "manifests").is_dir()
+    assert (recording_root / "exports").is_dir()
+    recorder.stop_all()
+
+
 def test_metadata_ready_state_includes_strategy_and_detection_sources(tmp_path: Path) -> None:
     recorder = RecorderManager(
         tmp_path,

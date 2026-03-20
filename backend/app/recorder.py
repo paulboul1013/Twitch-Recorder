@@ -26,7 +26,7 @@ from .ad_detection import (
     ranges_intersect,
 )
 from .api_integration import build_streamlink_command, build_streamlink_stream_url_command
-from .file_naming import build_recording_output_filename
+from .file_naming import build_channel_recording_directory, build_recording_output_filename
 from .finalizer import RecordingFinalizer
 from .metadata import RecordingMetadataWriter
 from .recording_types import ActiveRecording, RecordingEvent, RecordingResult, WatchableMetadataContext
@@ -243,11 +243,16 @@ class RecorderManager:
 
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         recording_id = f"{channel}_{timestamp}"
+        channel_recordings_path = build_channel_recording_directory(
+            recordings_path=self.recordings_path,
+            channel=channel,
+        )
+        channel_recordings_path.mkdir(parents=True, exist_ok=True)
         recording_root: Path | None = None
         full_artifact_path: Path | None = None
         clean_artifact_path: Path | None = None
         if self.recording_mode == "segment_native":
-            recording_root = self.recordings_path / recording_id
+            recording_root = channel_recordings_path / recording_id
             segments_dir = recording_root / "segments"
             manifests_dir = recording_root / "manifests"
             exports_dir = recording_root / "exports"
@@ -259,7 +264,7 @@ class RecorderManager:
             full_artifact_path = manifests_dir / "full.m3u8"
             clean_artifact_path = manifests_dir / "clean.m3u8"
         else:
-            output_path = self.recordings_path / f"{channel}_{timestamp}.{self.recording_raw_container}"
+            output_path = channel_recordings_path / f"{channel}_{timestamp}.{self.recording_raw_container}"
             metadata_path = output_path.with_suffix(".meta.json")
             full_artifact_path = output_path
 
