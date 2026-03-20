@@ -562,7 +562,9 @@ function renderRecordings(recordings) {
     const sourceFileName = recording.source_file_name || recording.file_name || "N/A";
     const displayFileName = isRecording
       ? sourceFileName
-      : recording.watchable_file_name || sourceFileName;
+      : recording.watchable_available && recording.watchable_file_name
+      ? recording.watchable_file_name
+      : sourceFileName;
     fileMeta.textContent = `${displayFileName} (${formatBytes(recording.size_bytes)})`;
     channelCell.append(fileMeta);
 
