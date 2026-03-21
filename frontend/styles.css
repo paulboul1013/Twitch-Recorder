@@ -455,6 +455,28 @@ input {
   font-size: 0.92rem;
 }
 
+.status-detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.status-detail-label {
+  flex: 0 0 auto;
+}
+
+.status-detail-value {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.status-detail-value[data-truncate-to-card-width="true"] {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .status-details strong {
   color: var(--text);
 }

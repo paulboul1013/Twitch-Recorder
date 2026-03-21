@@ -41,6 +41,8 @@ const elements = {
   toast: document.querySelector("#toast"),
 };
 
+let textMeasureCanvas = null;
+
 async function request(path, options = {}) {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     cache: "no-store",
@@ -313,11 +315,95 @@ function createAvatar(name, profileImageUrl) {
 
 function createStatusDetailRow(labelText, valueText) {
   const row = document.createElement("div");
+  row.className = "status-detail-row";
   const label = document.createElement("strong");
+  label.className = "status-detail-label";
   label.textContent = `${labelText}:`;
-  const valueNode = document.createTextNode(` ${valueText}`);
-  row.append(label, valueNode);
+  const value = document.createElement("span");
+  value.className = "status-detail-value";
+  value.textContent = valueText;
+  row.append(label, value);
   return row;
+}
+
+function createTruncatableTitleRow(valueText) {
+  const row = createStatusDetailRow("Title", valueText);
+  const valueNode = row.querySelector(".status-detail-value");
+  if (valueNode !== null) {
+    valueNode.dataset.truncateToCardWidth = "true";
+    valueNode.dataset.originalText = valueText;
+    valueNode.title = valueText;
+  }
+  return row;
+}
+
+function measureTextWidth(text, font) {
+  if (textMeasureCanvas === null) {
+    textMeasureCanvas = document.createElement("canvas");
+  }
+  const context = textMeasureCanvas.getContext("2d");
+  if (context === null) {
+    return text.length;
+  }
+  context.font = font;
+  return context.measureText(text).width;
+}
+
+function truncateToWidth(text, maxWidth, font, suffix = "...") {
+  if (!text) {
+    return text;
+  }
+  if (maxWidth <= 0) {
+    return suffix;
+  }
+  if (measureTextWidth(text, font) <= maxWidth) {
+    return text;
+  }
+
+  const suffixWidth = measureTextWidth(suffix, font);
+  if (suffixWidth >= maxWidth) {
+    return suffix;
+  }
+
+  const graphemes = Array.from(text);
+  let low = 0;
+  let high = graphemes.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = `${graphemes.slice(0, middle).join("")}${suffix}`;
+    if (measureTextWidth(candidate, font) <= maxWidth) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return `${graphemes.slice(0, low).join("")}${suffix}`;
+}
+
+function applyStatusTitleTruncation(scope = document) {
+  const titleNodes = scope.querySelectorAll(".status-detail-value[data-truncate-to-card-width=\"true\"]");
+  for (const valueNode of titleNodes) {
+    const fullTitle = valueNode.dataset.originalText || valueNode.textContent || "";
+    const row = valueNode.closest(".status-detail-row");
+    if (row === null) {
+      continue;
+    }
+
+    const label = row.querySelector(".status-detail-label");
+    const labelWidth = label ? label.getBoundingClientRect().width : 0;
+    const rowStyle = window.getComputedStyle(row);
+    const gapRaw = rowStyle.columnGap || rowStyle.gap || "0";
+    const gap = Number.parseFloat(gapRaw);
+    const normalizedGap = Number.isFinite(gap) ? gap : 0;
+    const availableWidth = Math.max(0, row.clientWidth - labelWidth - normalizedGap);
+
+    const valueStyle = window.getComputedStyle(valueNode);
+    const font = valueStyle.font
+      || `${valueStyle.fontStyle} ${valueStyle.fontWeight} ${valueStyle.fontSize} ${valueStyle.fontFamily}`;
+
+    valueNode.textContent = truncateToWidth(fullTitle, availableWidth, font);
+  }
 }
 
 function shiftStatusCarousel(statuses, step) {
@@ -666,7 +752,7 @@ function renderStatuses(statuses) {
       "Recording State",
       formatState(normalizeRecordingState(status.recording_state)),
     ),
-    createStatusDetailRow("Title", status.title || "N/A"),
+    createTruncatableTitleRow(status.title || "N/A"),
     createStatusDetailRow("Game", status.game_name || "N/A"),
     createStatusDetailRow("Viewers", String(status.viewer_count ?? "N/A")),
     createStatusDetailRow("Live Started", formatDate(status.started_at)),
@@ -713,6 +799,7 @@ function renderStatuses(statuses) {
   }
 
   elements.statusCards.append(card);
+  applyStatusTitleTruncation(card);
 }
 
 function renderRecordings(recordings) {
@@ -939,6 +1026,10 @@ elements.togglePolling.addEventListener("click", () => {
 document.addEventListener("visibilitychange", () => {
   state.pollingCountdownSeconds = Math.floor(pollIntervalMs / 1000);
   setPollingLabel();
+});
+
+window.addEventListener("resize", () => {
+  applyStatusTitleTruncation(elements.statusCards);
 });
 
 elements.recordingsTable.hidden = true;
