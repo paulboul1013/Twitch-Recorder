@@ -7,10 +7,16 @@ from pydantic import BaseModel, Field
 
 class StreamerCreate(BaseModel):
     name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_]+$")
+    enabled_for_recording: bool = True
 
 
 class StreamerInfo(BaseModel):
     name: str
+    enabled_for_recording: bool = True
+
+
+class StreamerUpdate(BaseModel):
+    enabled_for_recording: bool
 
 
 class RecordingDirectoryInfo(BaseModel):
@@ -34,6 +40,7 @@ class RecordingDirectoryDeleteResponse(BaseModel):
 
 class StreamStatus(BaseModel):
     name: str
+    enabled_for_recording: bool = True
     profile_image_url: str | None = None
     is_live: bool = False
     is_recording: bool = False

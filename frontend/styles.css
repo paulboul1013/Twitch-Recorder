@@ -257,6 +257,25 @@ input {
   gap: 12px;
 }
 
+.streamer-item-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.streamer-recording-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.streamer-recording-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
 .streamer-name-button {
   display: inline-flex;
   align-items: center;
@@ -421,6 +440,11 @@ input {
 
 .status-actions {
   justify-content: flex-end;
+}
+
+.status-action-note {
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 .badge {

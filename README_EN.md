@@ -18,6 +18,7 @@ It is useful for these situations:
 
 - Add Twitch streamers you want to monitor
 - Remove streamers from the management dashboard
+- Toggle auto recording per streamer (recording whitelist)
 - Automatically check whether a streamer is live
 - Wait a configurable number of seconds after a stream starts before recording, to avoid the opening `Preparing your stream`
 - Keep a short offline grace period before automatically stopping the recording
@@ -88,11 +89,12 @@ docker compose up -d --build
 1. Open the dashboard
 2. Enter the Twitch streamer name you want to monitor
 3. Click add, and the streamer will be saved to the watch list
-4. The system refreshes stream status automatically based on `POLL_INTERVAL_SECONDS`
-5. If the streamer goes live, the system waits for `RECORDING_START_DELAY_SECONDS` and then starts recording automatically
-6. You can also click `Start Recording` or `Stop Recording` manually on the live stream card
-7. After the streamer goes offline, the system keeps the recording alive for `OFFLINE_GRACE_PERIOD_SECONDS` before stopping
-8. Recorded files and related data are saved in the project folders
+4. In the watch list, switch each streamer's `Auto Record` on or off (off means monitor-only)
+5. The system refreshes stream status automatically based on `POLL_INTERVAL_SECONDS`
+6. If a streamer is live and `Auto Record` is on, the system waits for `RECORDING_START_DELAY_SECONDS` and starts recording automatically
+7. You can also click `Start Recording` or `Stop Recording` manually on the live stream card
+8. After the streamer goes offline, the system keeps the recording alive for `OFFLINE_GRACE_PERIOD_SECONDS` before stopping
+9. Recorded files and related data are saved in the project folders
 
 ## What You Can See On The Dashboard
 
@@ -123,7 +125,7 @@ All recording data is stored under folders in the project root:
 - `recordings/<recording_id>/`: one recording session directory
 - `recordings/<recording_id>/exports/`: exported video files
 - `recordings/<recording_id>/recording.meta.json`: metadata for one recording session
-- `config/streamers.json`: monitored streamer list
+- `config/streamers.json`: monitored streamer settings (including `enabled_for_recording`)
 - `config/recordings.json`: recording history index
 
 ## Ad Mitigation (Hybrid Mode)

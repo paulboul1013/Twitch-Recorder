@@ -18,6 +18,7 @@ English users: see [README_EN.md](./README_EN.md).
 
 - 新增你想監看的 Twitch 主播
 - 從管理畫面刪除主播
+- 針對每位主播個別切換是否允許自動錄影（白名單）
 - 自動檢查對方有沒有開播
 - 開播後依設定延遲幾秒再自動開始錄影，避開開場 `Preparing your stream`
 - 直播結束後保留短暫寬限期，再自動停止錄影
@@ -88,11 +89,12 @@ docker compose up -d --build
 1. 打開管理頁面
 2. 輸入你想監看的 Twitch 主播名稱
 3. 按下新增，主播會被存進監看名單
-4. 系統會依 `POLL_INTERVAL_SECONDS` 自動刷新直播狀態
-5. 如果主播開播，系統會先等待 `RECORDING_START_DELAY_SECONDS`，之後自動開始錄影
-6. 你也可以在直播卡片上手動按 `Start Recording` 或 `Stop Recording`
-7. 主播離線後，系統會依 `OFFLINE_GRACE_PERIOD_SECONDS` 保留寬限期再停止錄影
-8. 錄好的影片與相關資料會存到專案資料夾
+4. 在監看名單可切換每位主播 `Auto Record`，關閉代表只監看不自動錄影
+5. 系統會依 `POLL_INTERVAL_SECONDS` 自動刷新直播狀態
+6. 如果主播開播且 `Auto Record` 開啟，系統會先等待 `RECORDING_START_DELAY_SECONDS`，之後自動開始錄影
+7. 你也可以在直播卡片上手動按 `Start Recording` 或 `Stop Recording`
+8. 主播離線後，系統會依 `OFFLINE_GRACE_PERIOD_SECONDS` 保留寬限期再停止錄影
+9. 錄好的影片與相關資料會存到專案資料夾
 
 ## 管理畫面可以看到什麼
 
@@ -123,7 +125,7 @@ docker compose up -d --build
 - `recordings/<recording_id>/`：單次錄影資料夾
 - `recordings/<recording_id>/exports/`：匯出的影片檔
 - `recordings/<recording_id>/recording.meta.json`：單次錄影 metadata
-- `config/streamers.json`：監看名單
+- `config/streamers.json`：監看主播設定（含 `enabled_for_recording`）
 - `config/recordings.json`：錄影歷史索引
 
 ## 廣告緩解（Hybrid 模式）

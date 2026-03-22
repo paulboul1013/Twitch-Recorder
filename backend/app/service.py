@@ -22,7 +22,7 @@ from .models import (
     StreamerInfo,
 )
 from .recorder import RecorderManager, RecordingResult
-from .store import RecordingHistoryStore, StreamerStore, TrackedRecording
+from .store import RecordingHistoryStore, StreamerConfig, StreamerStore, TrackedRecording
 from .twitch import TwitchAuthError, TwitchClient
 
 
@@ -40,7 +40,11 @@ class MonitorService:
         self.recording_store = recording_store
         self.twitch_client = twitch_client
         self.recorder = recorder
-        self._streamers = self.store.load()
+        streamer_configs = self.store.load_configs()
+        self._streamers = [item.name for item in streamer_configs]
+        self._recording_enabled_by_streamer: dict[str, bool] = {
+            item.name: item.enabled_for_recording for item in streamer_configs
+        }
         self._statuses: dict[str, StreamStatus] = {
             name: StreamStatus(name=name) for name in self._streamers
         }
@@ -53,6 +57,20 @@ class MonitorService:
         self._clean_export_manager = CleanExportManager(
             max_concurrency=self.settings.clean_export_max_concurrency,
             on_state_change=self._on_clean_export_state_change,
+        )
+
+    def _is_recording_enabled(self, name: str) -> bool:
+        return self._recording_enabled_by_streamer.get(name, True)
+
+    def _save_streamers(self) -> None:
+        self.store.save_configs(
+            [
+                StreamerConfig(
+                    name=name,
+                    enabled_for_recording=self._is_recording_enabled(name),
+                )
+                for name in self._streamers
+            ]
         )
 
     def _watchable_state_from_tracked_recording(self, tracked: TrackedRecording) -> str:
@@ -263,17 +281,30 @@ class MonitorService:
         self._clean_export_manager.shutdown()
 
     def list_streamers(self) -> list[StreamerInfo]:
-        return [StreamerInfo(name=name) for name in self._streamers]
+        return [
+            StreamerInfo(name=name, enabled_for_recording=self._is_recording_enabled(name))
+            for name in self._streamers
+        ]
 
-    async def add_streamer(self, name: str) -> StreamerInfo:
+    async def add_streamer(self, name: str, *, enabled_for_recording: bool = True) -> StreamerInfo:
         normalized = name.strip().lower()
         async with self._lock:
             if normalized not in self._streamers:
                 self._streamers.append(normalized)
                 self._streamers.sort()
-                self.store.save(self._streamers)
-            self._statuses.setdefault(normalized, StreamStatus(name=normalized))
-        return StreamerInfo(name=normalized)
+                self._recording_enabled_by_streamer[normalized] = enabled_for_recording
+                self._save_streamers()
+            self._statuses.setdefault(
+                normalized,
+                StreamStatus(
+                    name=normalized,
+                    enabled_for_recording=self._is_recording_enabled(normalized),
+                ),
+            )
+        return StreamerInfo(
+            name=normalized,
+            enabled_for_recording=self._is_recording_enabled(normalized),
+        )
 
     async def remove_streamer(self, name: str) -> None:
         normalized = name.strip().lower()
@@ -283,9 +314,34 @@ class MonitorService:
             if result is not None:
                 self._apply_recording_result(result)
             self._streamers = [streamer for streamer in self._streamers if streamer != normalized]
-            self.store.save(self._streamers)
+            self._recording_enabled_by_streamer.pop(normalized, None)
+            self._save_streamers()
             self._statuses.pop(normalized, None)
             self._manually_stopped.discard(normalized)
+
+    async def set_streamer_recording_enabled(self, name: str, enabled_for_recording: bool) -> StreamerInfo:
+        normalized = name.strip().lower()
+        async with self._lock:
+            if normalized not in self._streamers:
+                raise ValueError("streamer not found")
+            self._recording_enabled_by_streamer[normalized] = enabled_for_recording
+            self._save_streamers()
+            status = self._statuses.setdefault(normalized, StreamStatus(name=normalized))
+            status.enabled_for_recording = enabled_for_recording
+            if not enabled_for_recording:
+                async with self._recorder_lock:
+                    result = self.recorder.stop_recording(normalized)
+                if result is not None:
+                    self._apply_recording_result(result)
+                status.is_recording = False
+                status.recording_state = "disabled"
+                status.last_error = None
+                status.stop_after_at = None
+                self._manually_stopped.discard(normalized)
+        return StreamerInfo(
+            name=normalized,
+            enabled_for_recording=enabled_for_recording,
+        )
 
     def _resolve_streamer_recording_root(self, tracked: TrackedRecording) -> Path:
         source_path = Path(tracked.source_file_path)
@@ -433,8 +489,14 @@ class MonitorService:
         async with self._lock:
             await self._sync_finished_recordings()
             status = self._statuses.setdefault(normalized, StreamStatus(name=normalized))
+            status.enabled_for_recording = self._is_recording_enabled(normalized)
 
             if self.recorder.is_recording(normalized):
+                return StartRecordingResponse(name=normalized, started=False)
+
+            if not self._is_recording_enabled(normalized):
+                status.recording_state = "disabled"
+                status.last_error = "recording is disabled for this streamer"
                 return StartRecordingResponse(name=normalized, started=False)
 
             if not status.is_live:
@@ -479,6 +541,7 @@ class MonitorService:
         statuses = []
         for name in sorted(self._statuses):
             status = self._statuses[name]
+            status.enabled_for_recording = self._is_recording_enabled(name)
             self._sync_active_recording_fields(status)
             statuses.append(status)
         return statuses
@@ -883,6 +946,7 @@ class MonitorService:
         for name in streamers:
             user = users.get(name)
             status = self._statuses.setdefault(name, StreamStatus(name=name))
+            status.enabled_for_recording = self._is_recording_enabled(name)
             if user is not None:
                 status.profile_image_url = user.profile_image_url
             status.last_checked_at = now
@@ -911,6 +975,17 @@ class MonitorService:
             if name in self._manually_stopped:
                 status.recording_state = "stopped"
                 status.is_recording = False
+                continue
+
+            if not self._is_recording_enabled(name):
+                if self.recorder.is_recording(name):
+                    async with self._recorder_lock:
+                        result = self.recorder.stop_recording(name)
+                    if result is not None:
+                        self._apply_recording_result(result)
+                status.recording_state = "disabled"
+                status.is_recording = self.recorder.is_recording(name)
+                status.last_error = None
                 continue
 
             if not self.recorder.is_recording(name):

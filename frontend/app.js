@@ -498,6 +498,19 @@ async function deleteStreamerRecordingDirectories(name) {
   }
 }
 
+async function setStreamerRecordingEnabled(name, enabledForRecording) {
+  const updated = await request(`/streamers/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled_for_recording: enabledForRecording }),
+  });
+  state.streamers = state.streamers.map((streamer) => (
+    streamer.name === updated.name ? updated : streamer
+  ));
+  renderStreamers(state.streamers);
+  await Promise.all([refreshStatuses(), refreshRecordings()]);
+  showToast(`${updated.name} recording ${updated.enabled_for_recording ? "enabled" : "disabled"}`);
+}
+
 function renderStreamers(streamers) {
   elements.streamerCount.textContent = String(streamers.length);
   elements.streamersList.replaceChildren();
@@ -530,6 +543,32 @@ function renderStreamers(streamers) {
       }
     });
 
+    const controls = document.createElement("div");
+    controls.className = "streamer-item-controls";
+
+    const toggleLabel = document.createElement("label");
+    toggleLabel.className = "streamer-recording-toggle";
+
+    const toggleInput = document.createElement("input");
+    toggleInput.type = "checkbox";
+    toggleInput.checked = streamer.enabled_for_recording !== false;
+    toggleInput.addEventListener("change", async () => {
+      const intendedValue = toggleInput.checked;
+      toggleInput.disabled = true;
+      try {
+        await setStreamerRecordingEnabled(streamer.name, intendedValue);
+      } catch (error) {
+        toggleInput.checked = !intendedValue;
+        showToast(error.message);
+      } finally {
+        toggleInput.disabled = false;
+      }
+    });
+
+    const toggleText = document.createElement("span");
+    toggleText.textContent = "Auto Record";
+    toggleLabel.append(toggleInput, toggleText);
+
     const removeButton = document.createElement("button");
     removeButton.className = "secondary";
     removeButton.textContent = "Remove";
@@ -543,7 +582,8 @@ function renderStreamers(streamers) {
       }
     });
 
-    topRow.append(labelButton, removeButton);
+    controls.append(toggleLabel, removeButton);
+    topRow.append(labelButton, controls);
     content.append(topRow);
 
     if (state.expandedStreamerName === streamer.name) {
@@ -719,28 +759,35 @@ function renderStatuses(statuses) {
     });
     actions.append(stopButton);
   } else if (status.is_live) {
-    const startButton = document.createElement("button");
-    startButton.textContent = "Start Recording";
-    startButton.addEventListener("click", async () => {
-      startButton.disabled = true;
-      startButton.textContent = "Starting...";
-      try {
-        const result = await request(`/streamers/${encodeURIComponent(status.name)}/start`, {
-          method: "POST",
-        });
-        if (result.started) {
-          showToast(`Started recording for ${status.name}`);
-        } else {
-          showToast(`Could not start recording for ${status.name}`);
+    if (status.enabled_for_recording === false) {
+      const disabledHint = document.createElement("span");
+      disabledHint.className = "status-action-note";
+      disabledHint.textContent = "Recording disabled";
+      actions.append(disabledHint);
+    } else {
+      const startButton = document.createElement("button");
+      startButton.textContent = "Start Recording";
+      startButton.addEventListener("click", async () => {
+        startButton.disabled = true;
+        startButton.textContent = "Starting...";
+        try {
+          const result = await request(`/streamers/${encodeURIComponent(status.name)}/start`, {
+            method: "POST",
+          });
+          if (result.started) {
+            showToast(`Started recording for ${status.name}`);
+          } else {
+            showToast(`Could not start recording for ${status.name}`);
+          }
+          await refreshAllData();
+        } catch (error) {
+          startButton.disabled = false;
+          startButton.textContent = "Start Recording";
+          showToast(error.message);
         }
-        await refreshAllData();
-      } catch (error) {
-        startButton.disabled = false;
-        startButton.textContent = "Start Recording";
-        showToast(error.message);
-      }
-    });
-    actions.append(startButton);
+      });
+      actions.append(startButton);
+    }
   }
 
   top.append(heading, actions);

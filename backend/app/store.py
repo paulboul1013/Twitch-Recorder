@@ -9,12 +9,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+@dataclass(slots=True, frozen=True)
+class StreamerConfig:
+    name: str
+    enabled_for_recording: bool = True
+
+
 class StreamerStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.RLock()
 
-    def load(self) -> list[str]:
+    def load_configs(self) -> list[StreamerConfig]:
         with self._lock:
             if not self.path.exists():
                 return []
@@ -22,10 +28,52 @@ class StreamerStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(payload, list):
                 raise ValueError("streamers store must contain a JSON list")
-            return sorted({str(item).strip().lower() for item in payload if str(item).strip()})
+            configs_by_name: dict[str, bool] = {}
+            for item in payload:
+                if isinstance(item, str):
+                    name = item.strip().lower()
+                    if name:
+                        configs_by_name[name] = True
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip().lower()
+                if not name:
+                    continue
+                enabled_for_recording = item.get("enabled_for_recording")
+                if not isinstance(enabled_for_recording, bool):
+                    enabled_for_recording = True
+                configs_by_name[name] = enabled_for_recording
+            return [
+                StreamerConfig(name=name, enabled_for_recording=enabled_for_recording)
+                for name, enabled_for_recording in sorted(configs_by_name.items())
+            ]
+
+    def load(self) -> list[str]:
+        return [item.name for item in self.load_configs()]
 
     def save(self, streamers: list[str]) -> None:
-        normalized = sorted({name.strip().lower() for name in streamers if name.strip()})
+        self.save_configs(
+            [
+                StreamerConfig(name=name, enabled_for_recording=True)
+                for name in streamers
+            ]
+        )
+
+    def save_configs(self, streamers: list[StreamerConfig]) -> None:
+        normalized: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for item in sorted(streamers, key=lambda value: value.name):
+            name = item.name.strip().lower()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            normalized.append(
+                {
+                    "name": name,
+                    "enabled_for_recording": bool(item.enabled_for_recording),
+                }
+            )
         with self._lock:
             _write_text_atomic(
                 self.path,

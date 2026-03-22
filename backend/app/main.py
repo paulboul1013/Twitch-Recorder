@@ -19,6 +19,7 @@ from .models import (
     StreamStatus,
     StreamerCreate,
     StreamerInfo,
+    StreamerUpdate,
 )
 from .recorder import RecorderManager
 from .service import MonitorService
@@ -104,7 +105,23 @@ def create_app(service: MonitorService | None = None, enable_background: bool = 
         payload: StreamerCreate,
         monitor_service: MonitorService = Depends(get_service),
     ) -> StreamerInfo:
-        return await monitor_service.add_streamer(payload.name)
+        return await monitor_service.add_streamer(
+            payload.name,
+            enabled_for_recording=payload.enabled_for_recording,
+        )
+
+    @app.patch("/streamers/{name}", response_model=StreamerInfo)
+    async def update_streamer(
+        name: str,
+        payload: StreamerUpdate,
+        monitor_service: MonitorService = Depends(get_service),
+    ) -> StreamerInfo:
+        if not any(streamer.name == name.lower() for streamer in monitor_service.list_streamers()):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="streamer not found")
+        return await monitor_service.set_streamer_recording_enabled(
+            name,
+            payload.enabled_for_recording,
+        )
 
     @app.get(
         "/streamers/{name}/recording-directories",

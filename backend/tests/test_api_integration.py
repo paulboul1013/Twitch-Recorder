@@ -20,17 +20,56 @@ def test_add_list_and_delete_streamers(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         created = client.post("/streamers", json={"name": "TestChannel"})
         assert created.status_code == 201
-        assert created.json() == {"name": "testchannel"}
+        assert created.json() == {"name": "testchannel", "enabled_for_recording": True}
 
         listed = client.get("/streamers")
         assert listed.status_code == 200
-        assert listed.json() == [{"name": "testchannel"}]
+        assert listed.json() == [{"name": "testchannel", "enabled_for_recording": True}]
 
         deleted = client.delete("/streamers/testchannel")
         assert deleted.status_code == 204
 
         listed_again = client.get("/streamers")
         assert listed_again.json() == []
+
+
+def test_streamer_recording_toggle_updates_streamer_config(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        created = client.post(
+            "/streamers",
+            json={"name": "TestChannel", "enabled_for_recording": False},
+        )
+        assert created.status_code == 201
+        assert created.json() == {"name": "testchannel", "enabled_for_recording": False}
+
+        updated = client.patch(
+            "/streamers/testchannel",
+            json={"enabled_for_recording": True},
+        )
+        assert updated.status_code == 200
+        assert updated.json() == {"name": "testchannel", "enabled_for_recording": True}
+
+        listed = client.get("/streamers")
+        assert listed.status_code == 200
+        assert listed.json() == [{"name": "testchannel", "enabled_for_recording": True}]
+
+
+def test_disabling_streamer_recording_stops_active_recording(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        client.post("/streamers", json={"name": "alpha"})
+        service: MonitorService = client.app.state.monitor_service
+
+        with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()):
+            service.recorder.start_recording("alpha")
+            assert service.recorder.is_recording("alpha") is True
+            response = client.patch(
+                "/streamers/alpha",
+                json={"enabled_for_recording": False},
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {"name": "alpha", "enabled_for_recording": False}
+        assert service.recorder.is_recording("alpha") is False
 
 
 def test_streamer_recording_directories_endpoint_lists_only_deletable_segment_native_dirs(
@@ -652,6 +691,22 @@ def test_start_recording_returns_not_started_when_offline(tmp_path: Path) -> Non
         assert response.json() == {"name": "alpha", "started": False}
 
 
+def test_start_recording_returns_not_started_when_recording_disabled(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        client.post("/streamers", json={"name": "alpha", "enabled_for_recording": False})
+
+        response = client.post("/streamers/alpha/start")
+
+        assert response.status_code == 200
+        assert response.json() == {"name": "alpha", "started": False}
+
+        statuses = client.get("/status")
+        assert statuses.status_code == 200
+        alpha = _status_for(statuses.json(), "alpha")
+        assert alpha["enabled_for_recording"] is False
+        assert alpha["recording_state"] == "disabled"
+
+
 def test_offline_recording_enters_grace_period_before_stop(tmp_path: Path) -> None:
     service = build_test_service(tmp_path, grace_seconds=30)
     service._streamers = ["alpha"]
@@ -852,6 +907,38 @@ def test_auto_start_waits_for_recording_start_delay(tmp_path: Path) -> None:
     assert alpha.is_live is True
     assert alpha.is_recording is False
     assert alpha.recording_state == "start_delay"
+
+
+def test_auto_start_skips_when_streamer_recording_disabled(tmp_path: Path) -> None:
+    service = build_test_service(tmp_path, start_delay_seconds=0)
+    service._streamers = ["alpha"]
+    service._recording_enabled_by_streamer = {"alpha": False}
+    service._statuses["alpha"] = StreamStatus(name="alpha")
+
+    class FakeLiveStream:
+        title = "Live now"
+        game_name = "Just Chatting"
+        viewer_count = 10
+        started_at = datetime.now(UTC)
+
+    async def fake_get_live_streams(usernames):
+        return {"alpha": FakeLiveStream()}
+
+    async def fake_get_users(usernames):
+        return {}
+
+    service.twitch_client.get_live_streams = fake_get_live_streams
+    service.twitch_client.get_users = fake_get_users
+
+    with patch("app.recorder.subprocess.Popen", return_value=FakeProcess()) as popen:
+        asyncio.run(service.refresh_once())
+
+    alpha = asyncio.run(service.list_statuses())[0]
+    assert popen.call_count == 0
+    assert alpha.is_live is True
+    assert alpha.enabled_for_recording is False
+    assert alpha.is_recording is False
+    assert alpha.recording_state == "disabled"
 
 
 def test_old_finalize_result_does_not_override_new_active_recording_status(tmp_path: Path) -> None:
