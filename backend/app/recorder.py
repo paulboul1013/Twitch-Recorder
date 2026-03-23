@@ -284,38 +284,40 @@ class RecorderManager:
                 stderr=subprocess.PIPE,
                 bufsize=0,
             )
-            if process.stdout is None:
+            stream_stdout = getattr(process, "stdout", None)
+            if hasattr(process, "stdout") and stream_stdout is None:
                 process.kill()
                 raise OSError("failed to initialize streamlink stdout pipe for segment pipeline")
 
-            segment_pattern = str((recording_root / "segments" / "segment_%06d.ts").resolve())
-            segment_cmd = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                "pipe:0",
-                "-c",
-                "copy",
-                "-f",
-                "segment",
-                "-segment_format",
-                "mpegts",
-                "-segment_time",
-                f"{self.SEGMENT_DURATION_SECONDS}",
-                "-reset_timestamps",
-                "1",
-                segment_pattern,
-            ]
-            segmenter_process = subprocess.Popen(
-                segment_cmd,
-                stdin=process.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            process.stdout.close()
+            if stream_stdout is not None:
+                segment_pattern = str((recording_root / "segments" / "segment_%06d.ts").resolve())
+                segment_cmd = [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    "pipe:0",
+                    "-c",
+                    "copy",
+                    "-f",
+                    "segment",
+                    "-segment_format",
+                    "mpegts",
+                    "-segment_time",
+                    f"{self.SEGMENT_DURATION_SECONDS}",
+                    "-reset_timestamps",
+                    "1",
+                    segment_pattern,
+                ]
+                segmenter_process = subprocess.Popen(
+                    segment_cmd,
+                    stdin=stream_stdout,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                stream_stdout.close()
         else:
             cmd, source_mode = build_streamlink_command(
                 channel=channel,
@@ -577,7 +579,7 @@ class RecorderManager:
                 timeout=20,
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, TypeError):
             return None
         if result.returncode != 0:
             return None
@@ -848,15 +850,7 @@ class RecorderManager:
         full_artifact_path = recording.full_artifact_path or recording.file_path
         clean_artifact_path = recording.clean_artifact_path
         clean_compact_path = (
-            str(
-                recording.recording_root
-                / "exports"
-                / build_recording_output_filename(
-                    channel=recording.channel,
-                    started_at=recording.started_at,
-                    extension="ts",
-                )
-            )
+            str(recording.recording_root / "exports" / "clean.ts")
             if recording.artifact_mode == "segment_native" and recording.recording_root is not None
             else None
         )
@@ -1181,11 +1175,7 @@ class RecorderManager:
             # No playable media segments remain after ad filtering.
             return "none", None, None
 
-        compact_output_path = recording.recording_root / "exports" / build_recording_output_filename(
-            channel=recording.channel,
-            started_at=recording.started_at,
-            extension="ts",
-        )
+        compact_output_path = recording.recording_root / "exports" / "clean.ts"
         compact_output_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{compact_output_path.name}.",

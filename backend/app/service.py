@@ -879,13 +879,15 @@ class MonitorService:
         clean_input_path = self._resolve_clean_export_input_path(tracked)
         recording_root = clean_input_path.parent.parent
         started_at = parse_recording_timestamp(tracked.started_at)
-        if started_at is None:
-            raise RuntimeError("recording start timestamp is unavailable for clean export naming")
-        output_path = recording_root / "exports" / build_recording_output_filename(
-            channel=tracked.channel,
-            started_at=started_at,
-            extension="mp4",
-        )
+        if started_at is not None:
+            output_name = build_recording_output_filename(
+                channel=tracked.channel,
+                started_at=started_at,
+                extension="mp4",
+            )
+        else:
+            output_name = "clean.mp4"
+        output_path = recording_root / "exports" / output_name
 
         job = self._clean_export_manager.enqueue(
             recording_id=recording_id,
