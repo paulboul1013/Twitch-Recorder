@@ -325,12 +325,15 @@ def extract_timed_id3_ad_offsets(
         "-show_data",
         str(source_path),
     ]
-    result = run_cmd(
-        cmd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        result = run_cmd(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
     if result.returncode != 0:
         return []
 
