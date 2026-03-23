@@ -220,7 +220,9 @@ class TwitchClient:
         param_name: str,
         values: list[str],
     ) -> dict[str, Any]:
-        params = [(param_name, value) for value in values]
+        params: list[tuple[str, str | int | float | bool | None]] = [
+            (param_name, value) for value in values
+        ]
 
         for attempt in range(self.max_retries + 1):
             await self._wait_for_request_window()

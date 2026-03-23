@@ -4,9 +4,9 @@ import json
 import math
 import os
 import subprocess
+import tempfile
 import threading
 import time
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,7 +26,7 @@ from .ad_detection import (
     ranges_intersect,
 )
 from .api_integration import build_streamlink_command, build_streamlink_stream_url_command
-from .file_naming import build_channel_recording_directory, build_recording_output_filename
+from .file_naming import build_channel_recording_directory
 from .finalizer import RecordingFinalizer
 from .metadata import RecordingMetadataWriter
 from .recording_types import ActiveRecording, RecordingEvent, RecordingResult, WatchableMetadataContext
