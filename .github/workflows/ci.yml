@@ -4,9 +4,21 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
 jobs:
-  backend-tests:
+  quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,12 +27,78 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+          python -m pip install -r backend/requirements-dev.txt
+
+      - name: Ruff lint
+        run: python -m ruff check backend/app backend/tests
+
+      - name: Mypy type check
+        run: python -m mypy backend/app/ad_detection.py backend/app/clean_export.py backend/app/file_naming.py backend/app/twitch.py
+
+  tests:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+          python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run backend tests with coverage
+        working-directory: backend
+        run: python -m pytest -q --cov=app --cov-report=term-missing --cov-fail-under=70
+
+  security:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r backend/requirements.txt
 
-      - name: Run backend tests
-        working-directory: backend
-        run: python -m pytest -q
+      - name: Audit runtime dependencies
+        env:
+          XDG_CACHE_HOME: /tmp/xdg-cache
+        run: python -m pip_audit -l --cache-dir /tmp/pip-audit-cache
