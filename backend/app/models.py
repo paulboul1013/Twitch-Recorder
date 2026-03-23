@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 class StreamerCreate(BaseModel):
@@ -26,6 +26,14 @@ class RecordingDirectoryInfo(BaseModel):
     started_at: datetime | None = None
     ended_at: datetime | None = None
     modified_at: datetime
+
+    @field_serializer("started_at", "ended_at", "modified_at")
+    def _serialize_datetime(self, value: datetime | None):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC).isoformat()
+        return value.isoformat()
 
 
 class RecordingDirectoryDeleteRequest(BaseModel):
