@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -140,6 +142,13 @@ class CleanExportManager:
         manifest_path = Path(job.manifest_path)
         output_path = Path(job.output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            dir=str(output_path.parent),
+        )
+        os.close(fd)
+        tmp_output_path = Path(tmp_name)
         if manifest_path.suffix.lower() == ".ts":
             cmd = [
                 "ffmpeg",
@@ -151,7 +160,7 @@ class CleanExportManager:
                 str(manifest_path),
                 "-c",
                 "copy",
-                str(output_path),
+                str(tmp_output_path),
             ]
         else:
             cmd = [
@@ -168,23 +177,28 @@ class CleanExportManager:
                 str(manifest_path),
                 "-c",
                 "copy",
-                str(output_path),
+                str(tmp_output_path),
             ]
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if result.returncode == 0:
-            return
-        error_text = (result.stderr or result.stdout or "").strip()
-        if len(error_text) > 500:
-            error_text = error_text[-500:]
-        raise RuntimeError(error_text or "ffmpeg export failed")
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if result.returncode != 0:
+                error_text = (result.stderr or result.stdout or "").strip()
+                if len(error_text) > 500:
+                    error_text = error_text[-500:]
+                raise RuntimeError(error_text or "ffmpeg export failed")
+            if not tmp_output_path.exists() or tmp_output_path.stat().st_size <= 0:
+                raise RuntimeError("ffmpeg export produced no output")
+            os.replace(tmp_output_path, output_path)
+        finally:
+            tmp_output_path.unlink(missing_ok=True)
 
     def _emit_state_change(self, job: CleanExportJob) -> None:
         if self.on_state_change is None:
