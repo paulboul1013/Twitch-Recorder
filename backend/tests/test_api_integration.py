@@ -328,6 +328,54 @@ def test_recordings_endpoint_lists_active_recording_with_current_file_size(tmp_p
             service.recorder.stop_all(wait_for_finalize=True)
 
 
+def test_recordings_endpoint_normalizes_none_like_active_export_fields(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        service: MonitorService = client.app.state.monitor_service
+        source_path = (
+            tmp_path / "recordings" / "saruei" / "saruei_20260401_143143_160299" / "segments" / "segment_000002.ts"
+        )
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(b"active-recording-data")
+
+        active_snapshot = [
+            {
+                "recording_id": "saruei_20260401_143143_160299",
+                "channel": "saruei",
+                "artifact_mode": "segment_native",
+                "source_path": str(source_path),
+                "size_bytes": source_path.stat().st_size,
+                "source_available": True,
+                "source_mode": "unauthenticated",
+                "full_artifact_path": None,
+                "clean_artifact_path": None,
+                "full_segment_count": 3,
+                "clean_segment_count": 0,
+                "clean_export_state": "None",
+                "clean_export_path": "None",
+                "clean_export_error": "None",
+                "clean_compact_state": "None",
+                "clean_compact_path": "None",
+                "clean_compact_error": "None",
+                "ad_break_count": 1,
+                "unknown_ad_confidence": False,
+            }
+        ]
+
+        with patch.object(service.recorder, "list_active_recordings", return_value=active_snapshot):
+            response = client.get("/recordings")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 1
+        row = payload[0]
+        assert row["recording_id"] == "saruei_20260401_143143_160299"
+        assert row["is_recording"] is True
+        assert row["clean_export_state"] == "none"
+        assert row["clean_export_path"] is None
+        assert row["clean_export_error"] is None
+        assert row["clean_export_dir_path"] == str((source_path.parent.parent / "exports").resolve())
+
+
 def test_streamer_recording_directories_delete_endpoint_removes_dirs_and_store_entries(
     tmp_path: Path,
 ) -> None:

@@ -211,6 +211,17 @@ class MonitorService:
             return str((candidate_path.parent.parent / "exports").resolve())
         return str((candidate_path.parent / "exports").resolve())
 
+    @staticmethod
+    def _optional_text(value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lower() == "none":
+            return None
+        return text
+
     def _should_auto_create_clean_export(self, tracked: TrackedRecording) -> bool:
         if tracked.artifact_mode != "segment_native":
             return False
@@ -788,13 +799,13 @@ class MonitorService:
             active_snapshots = self.recorder.list_active_recordings()
 
         for snapshot in active_snapshots:
-            recording_id = str(snapshot.get("recording_id", "")).strip()
-            source_path_value = str(snapshot.get("source_path", "")).strip()
+            recording_id = self._optional_text(snapshot.get("recording_id")) or ""
+            source_path_value = self._optional_text(snapshot.get("source_path")) or ""
             if not (recording_id and source_path_value):
                 continue
 
             source_path = Path(source_path_value)
-            channel = str(snapshot.get("channel", "")).strip().lower()
+            channel = (self._optional_text(snapshot.get("channel")) or "").lower()
             if not channel:
                 channel = recording_id
 
@@ -821,9 +832,9 @@ class MonitorService:
                     source_path.exists() and source_path.is_file(),
                 )
             )
-            source_mode = str(snapshot.get("source_mode", "unauthenticated")).strip() or "unauthenticated"
-            full_artifact_path = str(snapshot.get("full_artifact_path", "")).strip() or None
-            clean_artifact_path = str(snapshot.get("clean_artifact_path", "")).strip() or None
+            source_mode = self._optional_text(snapshot.get("source_mode")) or "unauthenticated"
+            full_artifact_path = self._optional_text(snapshot.get("full_artifact_path"))
+            clean_artifact_path = self._optional_text(snapshot.get("clean_artifact_path"))
 
             try:
                 full_segment_count = max(0, int(snapshot.get("full_segment_count", 0)))
@@ -834,16 +845,20 @@ class MonitorService:
             except (TypeError, ValueError):
                 clean_segment_count = 0
 
-            clean_export_state = str(snapshot.get("clean_export_state", "none")).strip().lower() or "none"
+            clean_export_state = (
+                self._optional_text(snapshot.get("clean_export_state")) or "none"
+            ).lower()
             if clean_export_state not in {"none", "queued", "processing", "ready", "failed"}:
                 clean_export_state = "none"
-            clean_export_path = str(snapshot.get("clean_export_path", "")).strip() or None
-            clean_export_error = str(snapshot.get("clean_export_error", "")).strip() or None
-            clean_compact_state = str(snapshot.get("clean_compact_state", "none")).strip().lower() or "none"
+            clean_export_path = self._optional_text(snapshot.get("clean_export_path"))
+            clean_export_error = self._optional_text(snapshot.get("clean_export_error"))
+            clean_compact_state = (
+                self._optional_text(snapshot.get("clean_compact_state")) or "none"
+            ).lower()
             if clean_compact_state not in {"none", "queued", "processing", "ready", "failed"}:
                 clean_compact_state = "none"
-            clean_compact_path = str(snapshot.get("clean_compact_path", "")).strip() or None
-            clean_compact_error = str(snapshot.get("clean_compact_error", "")).strip() or None
+            clean_compact_path = self._optional_text(snapshot.get("clean_compact_path"))
+            clean_compact_error = self._optional_text(snapshot.get("clean_compact_error"))
 
             try:
                 ad_break_count = max(0, int(snapshot.get("ad_break_count", 0)))
