@@ -147,9 +147,10 @@ class CleanExportManager:
         manifest_path = Path(job.manifest_path)
         output_path = Path(job.output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_suffix = output_path.suffix or ".mp4"
         fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{output_path.name}.",
-            suffix=".tmp",
+            prefix=f".{output_path.stem}.",
+            suffix=f".{uuid.uuid4().hex}{output_suffix}",
             dir=str(output_path.parent),
         )
         os.close(fd)

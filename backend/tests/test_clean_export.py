@@ -46,8 +46,8 @@ def test_run_ffmpeg_export_uses_temp_output_and_replaces_target_atomically(tmp_p
         temp_output = Path(cmd[-1])
         assert temp_output != output_path
         assert temp_output.parent == output_path.parent
-        assert temp_output.name.startswith(f".{output_path.name}.")
-        assert temp_output.suffix == ".tmp"
+        assert temp_output.name.startswith(f".{output_path.stem}.")
+        assert temp_output.suffix == output_path.suffix
         temp_output.write_bytes(b"new-output")
         return _FakeCompletedProcess(returncode=0)
 
@@ -55,7 +55,7 @@ def test_run_ffmpeg_export_uses_temp_output_and_replaces_target_atomically(tmp_p
         manager._run_ffmpeg_export(job)
 
     assert output_path.read_bytes() == b"new-output"
-    assert not list(output_path.parent.glob(f".{output_path.name}.*.tmp"))
+    assert not list(output_path.parent.glob(f".{output_path.stem}.*{output_path.suffix}"))
 
 
 def test_run_ffmpeg_export_failure_keeps_previous_output_and_cleans_temp_file(tmp_path: Path) -> None:
@@ -75,7 +75,7 @@ def test_run_ffmpeg_export_failure_keeps_previous_output_and_cleans_temp_file(tm
             assert "ffmpeg exploded" in str(exc)
 
     assert output_path.read_bytes() == b"old-output"
-    assert not list(output_path.parent.glob(f".{output_path.name}.*.tmp"))
+    assert not list(output_path.parent.glob(f".{output_path.stem}.*{output_path.suffix}"))
 
 
 def test_run_ffmpeg_export_rejects_empty_output_even_when_ffmpeg_returns_zero(tmp_path: Path) -> None:
@@ -93,7 +93,7 @@ def test_run_ffmpeg_export_rejects_empty_output_even_when_ffmpeg_returns_zero(tm
             assert "produced no output" in str(exc)
 
     assert output_path.exists() is False
-    assert not list(output_path.parent.glob(f".{output_path.name}.*.tmp"))
+    assert not list(output_path.parent.glob(f".{output_path.stem}.*{output_path.suffix}"))
 
 
 def test_enqueue_requeues_ready_job_when_output_file_is_missing(tmp_path: Path) -> None:
