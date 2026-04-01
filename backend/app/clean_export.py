@@ -46,6 +46,7 @@ class CleanExportManager:
         recording_id: str,
         manifest_path: Path,
         output_path: Path,
+        force: bool = False,
     ) -> CleanExportJob:
         now = time.time()
         with self._lock:
@@ -53,7 +54,11 @@ class CleanExportManager:
             if existing is not None:
                 if existing.state in {"queued", "processing"}:
                     return replace(existing)
-                if existing.state == "ready" and Path(existing.output_path).exists():
+                if (
+                    not force
+                    and existing.state == "ready"
+                    and Path(existing.output_path).exists()
+                ):
                     return replace(existing)
 
             job = CleanExportJob(

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import httpx
 
@@ -133,6 +135,7 @@ class MonitorService:
     def _on_clean_export_state_change(self, job: CleanExportJob) -> None:
         tracked_recordings = self.recording_store.load()
         updated = False
+        metadata_path: Path | None = None
         for tracked in tracked_recordings:
             if tracked.recording_id != job.recording_id:
                 continue
@@ -142,10 +145,96 @@ class MonitorService:
             tracked.watchable_state = self._watchable_state_from_tracked_recording(tracked)
             if job.state == "ready":
                 tracked.watchable_file_path = job.output_path
+            metadata_path = Path(tracked.metadata_path) if tracked.metadata_path else None
             updated = True
             break
         if updated:
             self.recording_store.save(tracked_recordings)
+            self._update_recording_metadata_export_fields(
+                metadata_path=metadata_path,
+                state=job.state,
+                output_path=job.output_path if job.state == "ready" else None,
+                error=job.error,
+            )
+
+    def _update_recording_metadata_export_fields(
+        self,
+        *,
+        metadata_path: Path | None,
+        state: str,
+        output_path: str | None,
+        error: str | None,
+    ) -> None:
+        if metadata_path is None or not metadata_path.exists() or not metadata_path.is_file():
+            return
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        payload["clean_export_state"] = state
+        payload["clean_export_path"] = output_path
+        payload["clean_export_dir_path"] = str(Path(output_path).parent) if output_path else None
+        payload["clean_export_error"] = error
+        try:
+            metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError:
+            return
+
+    def _clean_export_dir_path(
+        self,
+        *,
+        artifact_mode: str,
+        source_file_path: str,
+        full_artifact_path: str | None,
+        clean_artifact_path: str | None,
+        clean_export_path: str | None,
+        clean_compact_path: str | None = None,
+    ) -> str | None:
+        if artifact_mode != "segment_native":
+            return None
+        candidate_path: Path | None = None
+        for candidate in (
+            clean_export_path,
+            clean_compact_path,
+            clean_artifact_path,
+            full_artifact_path,
+            source_file_path,
+        ):
+            if candidate:
+                candidate_path = Path(candidate)
+                break
+        if candidate_path is None:
+            return None
+        if candidate_path.parent.name in {"exports", "manifests", "segments"}:
+            return str((candidate_path.parent.parent / "exports").resolve())
+        return str((candidate_path.parent / "exports").resolve())
+
+    def _should_auto_create_clean_export(self, tracked: TrackedRecording) -> bool:
+        if tracked.artifact_mode != "segment_native":
+            return False
+        state = str(tracked.state or "").strip().lower()
+        if state not in {"completed", "stopped"}:
+            return False
+        if tracked.clean_export_state in {"queued", "processing", "ready"}:
+            if tracked.clean_export_state != "ready":
+                return False
+            if tracked.clean_export_path and Path(tracked.clean_export_path).exists():
+                return False
+        compact_path = self._clean_compact_path_if_ready(tracked)
+        if compact_path is not None:
+            return True
+        return tracked.clean_segment_count > 0
+
+    def _auto_create_clean_export_if_needed(self, recording_id: str) -> None:
+        tracked = self._find_recording_by_id(recording_id)
+        if tracked is None or not self._should_auto_create_clean_export(tracked):
+            return
+        try:
+            self.create_clean_export(recording_id, mode="auto")
+        except (ValueError, RuntimeError, FileNotFoundError):
+            return
 
     def _apply_recording_result(self, result: RecordingResult) -> None:
         status = self._statuses.get(result.channel)
@@ -171,43 +260,43 @@ class MonitorService:
                     status.last_error = result.clean_output_error
                 else:
                     status.last_error = None
-        self.recording_store.upsert(
-            TrackedRecording(
-                channel=result.channel,
-                source_file_path=str(result.file_path),
-                recording_id=result.recording_id,
-                artifact_mode=result.artifact_mode,
-                metadata_path=str(result.metadata_path),
-                watchable_file_path=(
-                    result.clean_export_path
-                    if result.clean_export_path
-                    else result.clean_compact_path
-                    if result.clean_compact_state == "ready" and result.clean_compact_path
-                    else result.clean_artifact_path or result.clean_output_path
-                ),
-                watchable_state=result.clean_output_state,
-                ad_break_count=result.ad_break_count,
-                source_mode=result.source_mode,
-                started_at=result.started_at.isoformat(),
-                ended_at=result.ended_at.isoformat(),
-                state=result.state,
-                clean_output_error=result.clean_output_error,
-                source_available=result.source_available,
-                source_deleted_on_success=result.source_deleted_on_success,
-                source_delete_error=result.source_delete_error,
-                full_artifact_path=result.full_artifact_path,
-                clean_artifact_path=result.clean_artifact_path,
-                clean_compact_state=result.clean_compact_state,
-                clean_compact_path=result.clean_compact_path,
-                clean_compact_error=result.clean_compact_error,
-                full_segment_count=result.full_segment_count,
-                clean_segment_count=result.clean_segment_count,
-                clean_export_state=result.clean_export_state,
-                clean_export_path=result.clean_export_path,
-                clean_export_error=result.clean_export_error,
-                unknown_ad_confidence=result.unknown_ad_confidence,
-            )
+        tracked = TrackedRecording(
+            channel=result.channel,
+            source_file_path=str(result.file_path),
+            recording_id=result.recording_id,
+            artifact_mode=result.artifact_mode,
+            metadata_path=str(result.metadata_path),
+            watchable_file_path=(
+                result.clean_export_path
+                if result.clean_export_path
+                else result.clean_compact_path
+                if result.clean_compact_state == "ready" and result.clean_compact_path
+                else result.clean_artifact_path or result.clean_output_path
+            ),
+            watchable_state=result.clean_output_state,
+            ad_break_count=result.ad_break_count,
+            source_mode=result.source_mode,
+            started_at=result.started_at.isoformat(),
+            ended_at=result.ended_at.isoformat(),
+            state=result.state,
+            clean_output_error=result.clean_output_error,
+            source_available=result.source_available,
+            source_deleted_on_success=result.source_deleted_on_success,
+            source_delete_error=result.source_delete_error,
+            full_artifact_path=result.full_artifact_path,
+            clean_artifact_path=result.clean_artifact_path,
+            clean_compact_state=result.clean_compact_state,
+            clean_compact_path=result.clean_compact_path,
+            clean_compact_error=result.clean_compact_error,
+            full_segment_count=result.full_segment_count,
+            clean_segment_count=result.clean_segment_count,
+            clean_export_state=result.clean_export_state,
+            clean_export_path=result.clean_export_path,
+            clean_export_error=result.clean_export_error,
+            unknown_ad_confidence=result.unknown_ad_confidence,
         )
+        self.recording_store.upsert(tracked)
+        self._auto_create_clean_export_if_needed(result.recording_id)
 
     def _apply_finished_recordings(self, results: list[RecordingResult]) -> None:
         for result in results:
@@ -267,6 +356,7 @@ class MonitorService:
 
     async def start(self) -> None:
         if self._task is None:
+            self._recover_pending_clean_export_jobs()
             self._task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
@@ -679,6 +769,14 @@ class MonitorService:
                     clean_segment_count=tracked.clean_segment_count,
                     clean_export_state=tracked.clean_export_state,
                     clean_export_path=tracked.clean_export_path,
+                    clean_export_dir_path=self._clean_export_dir_path(
+                        artifact_mode=tracked.artifact_mode,
+                        source_file_path=tracked.source_file_path,
+                        full_artifact_path=tracked.effective_full_artifact_path,
+                        clean_artifact_path=tracked.effective_clean_artifact_path,
+                        clean_export_path=tracked.clean_export_path,
+                        clean_compact_path=tracked.clean_compact_path,
+                    ),
                     clean_export_error=tracked.clean_export_error,
                     unknown_ad_confidence=tracked.unknown_ad_confidence,
                     size_bytes=size_bytes,
@@ -801,6 +899,14 @@ class MonitorService:
                 clean_segment_count=clean_segment_count,
                 clean_export_state=clean_export_state,
                 clean_export_path=clean_export_path,
+                clean_export_dir_path=self._clean_export_dir_path(
+                    artifact_mode=artifact_mode,
+                    source_file_path=str(source_path),
+                    full_artifact_path=full_artifact_path,
+                    clean_artifact_path=clean_artifact_path,
+                    clean_export_path=clean_export_path,
+                    clean_compact_path=clean_compact_path,
+                ),
                 clean_export_error=clean_export_error,
                 unknown_ad_confidence=unknown_ad_confidence,
                 size_bytes=size_bytes,
@@ -866,7 +972,32 @@ class MonitorService:
             raise FileNotFoundError("clean manifest not found")
         return clean_manifest_path
 
-    def create_clean_export(self, recording_id: str) -> CleanExportStatusResponse:
+    def _recover_pending_clean_export_jobs(self) -> None:
+        for tracked in self.recording_store.load():
+            if tracked.artifact_mode != "segment_native":
+                continue
+            if tracked.clean_export_state not in {"queued", "processing"}:
+                continue
+            try:
+                self.create_clean_export(tracked.recording_id, mode="force")
+            except (ValueError, RuntimeError, FileNotFoundError) as exc:
+                self._on_clean_export_state_change(
+                    CleanExportJob(
+                        job_id="startup-recovery",
+                        recording_id=tracked.recording_id,
+                        state="failed",
+                        manifest_path="",
+                        output_path="",
+                        error=str(exc) or "failed to recover clean export job",
+                    )
+                )
+
+    def create_clean_export(
+        self,
+        recording_id: str,
+        *,
+        mode: Literal["auto", "retry", "force"] = "retry",
+    ) -> CleanExportStatusResponse:
         tracked = self._find_recording_by_id(recording_id)
         if tracked is None:
             raise ValueError("recording not found")
@@ -889,10 +1020,38 @@ class MonitorService:
             output_name = "clean.mp4"
         output_path = recording_root / "exports" / output_name
 
+        if mode in {"auto", "retry"}:
+            in_progress_job = self._clean_export_manager.get(recording_id)
+            if in_progress_job is not None and in_progress_job.state in {"queued", "processing"}:
+                return CleanExportStatusResponse(
+                    recording_id=recording_id,
+                    job_id=in_progress_job.job_id,
+                    state=in_progress_job.state,
+                    output_path=in_progress_job.output_path if in_progress_job.state == "ready" else None,
+                    error=in_progress_job.error,
+                )
+        if mode == "retry":
+            if tracked.clean_export_state == "ready" and tracked.clean_export_path:
+                export_path = Path(tracked.clean_export_path)
+                if export_path.exists() and export_path.is_file():
+                    raise RuntimeError("clean export is already ready; use mode=force to rebuild")
+            if tracked.clean_export_state != "failed":
+                raise RuntimeError("clean export retry is only available after a failed export")
+        if mode == "auto" and tracked.clean_export_state == "ready" and tracked.clean_export_path:
+            export_path = Path(tracked.clean_export_path)
+            if export_path.exists() and export_path.is_file():
+                return CleanExportStatusResponse(
+                    recording_id=recording_id,
+                    state="ready",
+                    output_path=str(export_path),
+                    error=None,
+                )
+
         job = self._clean_export_manager.enqueue(
             recording_id=recording_id,
             manifest_path=clean_input_path,
             output_path=output_path,
+            force=(mode == "force"),
         )
         return CleanExportStatusResponse(
             recording_id=recording_id,

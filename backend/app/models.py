@@ -92,6 +92,7 @@ class RecordingInfo(BaseModel):
     clean_segment_count: int = 0
     clean_export_state: str = "none"
     clean_export_path: str | None = None
+    clean_export_dir_path: str | None = None
     clean_export_error: str | None = None
     unknown_ad_confidence: bool = False
     size_bytes: int

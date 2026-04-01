@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -242,10 +243,11 @@ def create_app(service: MonitorService | None = None, enable_background: bool = 
     )
     async def create_clean_mp4_export(
         recording_id: str,
+        mode: Literal["retry", "force"] = "retry",
         monitor_service: MonitorService = Depends(get_service),
     ) -> CleanExportStatusResponse:
         try:
-            return monitor_service.create_clean_export(recording_id)
+            return monitor_service.create_clean_export(recording_id, mode=mode)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except RuntimeError as exc:

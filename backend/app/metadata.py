@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 from .ad_detection import count_ad_breaks, infer_ad_detection_sources_from_events
 from .recording_types import ActiveRecording
@@ -85,6 +86,9 @@ class RecordingMetadataWriter:
             "clean_segment_count": max(0, int(clean_segment_count)),
             "clean_export_state": clean_export_state,
             "clean_export_path": self._stringify_path(clean_export_path),
+            "clean_export_dir_path": (
+                str(Path(clean_export_path).parent) if clean_export_path else None
+            ),
             "clean_export_error": clean_export_error,
             "clean_compact_state": clean_compact_state,
             "clean_compact_path": self._stringify_path(clean_compact_path),

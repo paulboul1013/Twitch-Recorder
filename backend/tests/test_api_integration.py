@@ -12,9 +12,10 @@ from app.api_integration import build_streamlink_command
 from app.clean_export import CleanExportJob
 from app.models import StreamStatus
 from app.recorder import RecorderManager
+from app.recording_types import RecordingResult
 from app.service import MonitorService
 from app.store import TrackedRecording
-from conftest import FakeProcess, _status_for, build_test_client, build_test_service
+from conftest import FakeProcess, _load_metadata, _status_for, build_test_client, build_test_service
 
 def test_add_list_and_delete_streamers(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
@@ -465,7 +466,7 @@ def test_segment_native_download_and_export_status_endpoints(tmp_path: Path) -> 
         assert status_response.json()["state"] == "ready"
 
 
-def test_segment_native_export_creation_endpoint_returns_queued_job(tmp_path: Path) -> None:
+def test_segment_native_export_creation_endpoint_returns_queued_job_for_retry_mode(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         recording_root = tmp_path / "recordings" / "alpha_20250301_120000_000002"
         segments_dir = recording_root / "segments"
@@ -489,7 +490,8 @@ def test_segment_native_export_creation_endpoint_returns_queued_job(tmp_path: Pa
                 clean_artifact_path=str(clean_manifest),
                 full_segment_count=1,
                 clean_segment_count=1,
-                clean_export_state="none",
+                clean_export_state="failed",
+                clean_export_error="ffmpeg export failed",
                 watchable_state="ready",
             )
         )
@@ -514,6 +516,42 @@ def test_segment_native_export_creation_endpoint_returns_queued_job(tmp_path: Pa
             "output_path": None,
             "error": None,
         }
+
+
+def test_segment_native_export_creation_endpoint_rejects_retry_when_export_not_failed(
+    tmp_path: Path,
+) -> None:
+    with build_test_client(tmp_path) as client:
+        recording_root = tmp_path / "recordings" / "alpha_20250301_120000_000099"
+        segments_dir = recording_root / "segments"
+        manifests_dir = recording_root / "manifests"
+        segments_dir.mkdir(parents=True, exist_ok=True)
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_path = segments_dir / "segment_000000.ts"
+        clean_manifest = manifests_dir / "clean.m3u8"
+        segment_path.write_bytes(b"video-data")
+        clean_manifest.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(segment_path),
+                recording_id="rec-segment-retry-blocked",
+                artifact_mode="segment_native",
+                full_artifact_path=str(manifests_dir / "full.m3u8"),
+                clean_artifact_path=str(clean_manifest),
+                full_segment_count=1,
+                clean_segment_count=1,
+                clean_export_state="none",
+                watchable_state="ready",
+            )
+        )
+
+        response = client.post("/recordings/rec-segment-retry-blocked/exports/clean-mp4")
+        assert response.status_code == 400
+        assert response.json()["detail"] == "clean export retry is only available after a failed export"
 
 
 def test_segment_native_export_creation_prefers_clean_ts_when_compact_ready(tmp_path: Path) -> None:
@@ -559,12 +597,100 @@ def test_segment_native_export_creation_prefers_clean_ts_when_compact_ready(tmp_
             updated_at=0.0,
         )
         with patch.object(service._clean_export_manager, "enqueue", return_value=fake_job) as enqueue:
-            response = client.post("/recordings/rec-segment-3/exports/clean-mp4")
+            response = client.post("/recordings/rec-segment-3/exports/clean-mp4?mode=force")
 
         assert response.status_code == 202
         assert response.json()["state"] == "queued"
         assert enqueue.call_count == 1
         assert Path(enqueue.call_args.kwargs["manifest_path"]) == clean_ts
+
+
+def test_segment_native_export_creation_force_mode_rebuilds_ready_export(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        recording_root = tmp_path / "recordings" / "alpha_20260318_120000_000098"
+        segments_dir = recording_root / "segments"
+        manifests_dir = recording_root / "manifests"
+        exports_dir = recording_root / "exports"
+        segments_dir.mkdir(parents=True, exist_ok=True)
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        exports_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_path = segments_dir / "segment_000000.ts"
+        clean_manifest = manifests_dir / "clean.m3u8"
+        clean_export = exports_dir / "alpha_20260318_120000.mp4"
+        segment_path.write_bytes(b"video-data")
+        clean_manifest.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+        clean_export.write_bytes(b"ready-mp4")
+
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(segment_path),
+                recording_id="rec-segment-force-rebuild",
+                artifact_mode="segment_native",
+                full_artifact_path=str(manifests_dir / "full.m3u8"),
+                clean_artifact_path=str(clean_manifest),
+                clean_segment_count=1,
+                clean_export_state="ready",
+                clean_export_path=str(clean_export),
+                watchable_state="ready",
+            )
+        )
+
+        fake_job = CleanExportJob(
+            job_id="job-force-1",
+            recording_id="rec-segment-force-rebuild",
+            state="queued",
+            manifest_path=str(clean_manifest),
+            output_path=str(clean_export),
+            created_at=0.0,
+            updated_at=0.0,
+        )
+        with patch.object(service._clean_export_manager, "enqueue", return_value=fake_job) as enqueue:
+            response = client.post("/recordings/rec-segment-force-rebuild/exports/clean-mp4?mode=force")
+
+        assert response.status_code == 202
+        assert response.json()["state"] == "queued"
+        assert enqueue.call_count == 1
+        assert enqueue.call_args.kwargs["force"] is True
+
+
+def test_recordings_endpoint_includes_clean_export_directory_path(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        recording_root = tmp_path / "recordings" / "alpha" / "alpha_20260318_120000_000010"
+        segments_dir = recording_root / "segments"
+        manifests_dir = recording_root / "manifests"
+        exports_dir = recording_root / "exports"
+        segments_dir.mkdir(parents=True, exist_ok=True)
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        exports_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_path = segments_dir / "segment_000000.ts"
+        clean_manifest = manifests_dir / "clean.m3u8"
+        clean_export = exports_dir / "alpha_20260318_120000.mp4"
+        segment_path.write_bytes(b"video-data")
+        clean_manifest.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+        clean_export.write_bytes(b"clean-video")
+
+        service: MonitorService = client.app.state.monitor_service
+        service.recording_store.upsert(
+            TrackedRecording(
+                channel="alpha",
+                source_file_path=str(segment_path),
+                recording_id="rec-segment-export-dir",
+                artifact_mode="segment_native",
+                clean_artifact_path=str(clean_manifest),
+                clean_export_state="ready",
+                clean_export_path=str(clean_export),
+                watchable_state="ready",
+            )
+        )
+
+        response = client.get("/recordings")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload[0]["clean_export_dir_path"] == str(exports_dir.resolve())
 
 
 def test_segment_native_export_creation_rejects_empty_clean_segments(tmp_path: Path) -> None:
@@ -596,9 +722,204 @@ def test_segment_native_export_creation_rejects_empty_clean_segments(tmp_path: P
             )
         )
 
-        response = client.post("/recordings/rec-segment-4/exports/clean-mp4")
+        response = client.post("/recordings/rec-segment-4/exports/clean-mp4?mode=force")
         assert response.status_code == 400
         assert "no playable segments" in response.json()["detail"]
+
+
+def test_apply_recording_result_auto_enqueues_clean_export_for_completed_segment_native(
+    tmp_path: Path,
+) -> None:
+    service = build_test_service(tmp_path)
+    recording_root = tmp_path / "recordings" / "alpha" / "alpha_20260318_120000_000011"
+    segments_dir = recording_root / "segments"
+    manifests_dir = recording_root / "manifests"
+    exports_dir = recording_root / "exports"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    segment_path = segments_dir / "segment_000000.ts"
+    metadata_path = recording_root / "recording.meta.json"
+    clean_manifest = manifests_dir / "clean.m3u8"
+    clean_ts = exports_dir / "clean.ts"
+    segment_path.write_bytes(b"video-data")
+    clean_manifest.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+    clean_ts.write_bytes(b"clean-video-data")
+    metadata_path.write_text("{}", encoding="utf-8")
+
+    started_at = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
+    ended_at = datetime(2026, 3, 18, 12, 30, 0, tzinfo=UTC)
+
+    fake_job = CleanExportJob(
+        job_id="job-auto-1",
+        recording_id="rec-auto-export",
+        state="queued",
+        manifest_path=str(clean_ts),
+        output_path=str(exports_dir / "alpha_20260318_120000.mp4"),
+        created_at=0.0,
+        updated_at=0.0,
+    )
+    result = RecordingResult(
+        recording_id="rec-auto-export",
+        artifact_mode="segment_native",
+        channel="alpha",
+        file_path=segment_path,
+        metadata_path=metadata_path,
+        started_at=started_at,
+        ended_at=ended_at,
+        exit_code=0,
+        state="completed",
+        source_mode="unauthenticated",
+        full_artifact_path=str(manifests_dir / "full.m3u8"),
+        clean_artifact_path=str(clean_manifest),
+        full_segment_count=3,
+        clean_segment_count=2,
+        clean_export_state="none",
+        clean_export_path=None,
+        clean_export_error=None,
+        clean_compact_state="ready",
+        clean_compact_path=str(clean_ts),
+        clean_compact_error=None,
+        unknown_ad_confidence=False,
+        clean_output_path=str(clean_manifest),
+        clean_output_state="ready",
+        clean_output_error=None,
+        ad_break_count=1,
+    )
+
+    with patch.object(service._clean_export_manager, "enqueue", return_value=fake_job) as enqueue:
+        service._apply_recording_result(result)
+
+    assert enqueue.call_count == 1
+    assert Path(enqueue.call_args.kwargs["manifest_path"]) == clean_ts
+    tracked = service.recording_store.load()[0]
+    assert tracked.clean_export_state == "none"
+
+
+def test_clean_export_state_change_updates_metadata_with_export_directory(tmp_path: Path) -> None:
+    service = build_test_service(tmp_path)
+    recording_root = tmp_path / "recordings" / "alpha" / "alpha_20260318_120000_000012"
+    segments_dir = recording_root / "segments"
+    exports_dir = recording_root / "exports"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    segment_path = segments_dir / "segment_000000.ts"
+    metadata_path = recording_root / "recording.meta.json"
+    segment_path.write_bytes(b"video-data")
+    metadata_path.write_text("{}", encoding="utf-8")
+
+    service.recording_store.upsert(
+        TrackedRecording(
+            channel="alpha",
+            source_file_path=str(segment_path),
+            recording_id="rec-meta-export",
+            artifact_mode="segment_native",
+            metadata_path=str(metadata_path),
+            clean_export_state="processing",
+        )
+    )
+
+    output_path = exports_dir / "alpha_20260318_120000.mp4"
+    service._on_clean_export_state_change(
+        CleanExportJob(
+            job_id="job-meta-1",
+            recording_id="rec-meta-export",
+            state="ready",
+            manifest_path=str(recording_root / "manifests" / "clean.m3u8"),
+            output_path=str(output_path),
+            created_at=0.0,
+            updated_at=0.0,
+        )
+    )
+
+    metadata = _load_metadata(metadata_path)
+    assert metadata["clean_export_state"] == "ready"
+    assert metadata["clean_export_path"] == str(output_path)
+    assert metadata["clean_export_dir_path"] == str(exports_dir)
+
+
+def test_startup_recovery_requeues_processing_clean_export_jobs(tmp_path: Path) -> None:
+    service = build_test_service(tmp_path)
+    recording_root = tmp_path / "recordings" / "alpha" / "alpha_20260318_120000_000013"
+    segments_dir = recording_root / "segments"
+    manifests_dir = recording_root / "manifests"
+    exports_dir = recording_root / "exports"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    segment_path = segments_dir / "segment_000000.ts"
+    clean_manifest = manifests_dir / "clean.m3u8"
+    clean_ts = exports_dir / "clean.ts"
+    segment_path.write_bytes(b"video-data")
+    clean_manifest.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+    clean_ts.write_bytes(b"clean-video-data")
+
+    service.recording_store.upsert(
+        TrackedRecording(
+            channel="alpha",
+            source_file_path=str(segment_path),
+            recording_id="rec-startup-recover",
+            artifact_mode="segment_native",
+            state="completed",
+            clean_artifact_path=str(clean_manifest),
+            clean_compact_state="ready",
+            clean_compact_path=str(clean_ts),
+            clean_segment_count=2,
+            clean_export_state="processing",
+        )
+    )
+
+    fake_job = CleanExportJob(
+        job_id="job-startup-1",
+        recording_id="rec-startup-recover",
+        state="queued",
+        manifest_path=str(clean_ts),
+        output_path=str(exports_dir / "alpha_20260318_120000.mp4"),
+        created_at=0.0,
+        updated_at=0.0,
+    )
+    with patch.object(service._clean_export_manager, "enqueue", return_value=fake_job) as enqueue:
+        service._recover_pending_clean_export_jobs()
+
+    assert enqueue.call_count == 1
+    assert enqueue.call_args.kwargs["recording_id"] == "rec-startup-recover"
+    assert enqueue.call_args.kwargs["force"] is True
+
+
+def test_startup_recovery_marks_export_failed_when_requeue_cannot_start(tmp_path: Path) -> None:
+    service = build_test_service(tmp_path)
+    recording_root = tmp_path / "recordings" / "alpha" / "alpha_20260318_120000_000014"
+    segments_dir = recording_root / "segments"
+    metadata_path = recording_root / "recording.meta.json"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    segment_path = segments_dir / "segment_000000.ts"
+    segment_path.write_bytes(b"video-data")
+    metadata_path.write_text("{}", encoding="utf-8")
+
+    service.recording_store.upsert(
+        TrackedRecording(
+            channel="alpha",
+            source_file_path=str(segment_path),
+            recording_id="rec-startup-failed",
+            artifact_mode="segment_native",
+            state="completed",
+            metadata_path=str(metadata_path),
+            clean_segment_count=0,
+            clean_export_state="processing",
+        )
+    )
+
+    service._recover_pending_clean_export_jobs()
+
+    tracked = service.recording_store.load()[0]
+    assert tracked.clean_export_state == "failed"
+    assert tracked.clean_export_error == "clean recording has no playable segments"
+    metadata = _load_metadata(metadata_path)
+    assert metadata["clean_export_state"] == "failed"
+    assert metadata["clean_export_path"] is None
 
 
 def test_build_streamlink_command_uses_mpegts_for_ts_output_and_oauth_header() -> None:
