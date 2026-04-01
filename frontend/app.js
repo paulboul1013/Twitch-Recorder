@@ -191,22 +191,12 @@ function normalizeRecordingState(recordingState) {
   return recordingState;
 }
 
-function triggerDownload(path) {
-  window.open(`${apiBaseUrl}${path}`, "_blank", "noopener");
-}
-
 function toFileName(pathValue) {
   if (!pathValue) {
     return "N/A";
   }
   const parts = String(pathValue).split("/");
   return parts[parts.length - 1] || "N/A";
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
 }
 
 function scheduleRecordingsFollowupRefresh() {
@@ -228,22 +218,6 @@ function clearRecordingsFollowupRefresh() {
     window.clearTimeout(state.recordingsFollowupTimerId);
     state.recordingsFollowupTimerId = null;
   }
-}
-
-async function waitForCleanExportReady(recordingId, { timeoutMs = 120000, intervalMs = 1500 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const status = await request(`/recordings/${encodeURIComponent(recordingId)}/exports/clean-mp4`);
-    const exportState = String(status.state || "").toLowerCase();
-    if (exportState === "ready") {
-      return;
-    }
-    if (exportState === "failed") {
-      throw new Error(status.error || "Clean MP4 export failed");
-    }
-    await sleep(intervalMs);
-  }
-  throw new Error("Clean MP4 export is still processing, please try again shortly.");
 }
 
 function getCleanExportStatus(recording) {
@@ -269,7 +243,7 @@ function getCleanExportStatus(recording) {
   const compactState = String(recording.clean_compact_state || "none").toLowerCase();
   if (exportState === "failed" || compactState === "failed") {
     return {
-      text: "Export failed",
+      text: "MP4 export failed",
       tone: "watchable-failed",
     };
   }
@@ -280,18 +254,18 @@ function getCleanExportStatus(recording) {
     compactState === "processing"
   ) {
     return {
-      text: "Processing",
+      text: "Preparing MP4 automatically",
       tone: "watchable-pending",
     };
   }
   if (compactState === "ready" || exportState === "ready") {
     return {
-      text: "Ready to export MP4",
+      text: "MP4 ready",
       tone: "watchable-ready",
     };
   }
   return {
-    text: "Processing",
+    text: "Preparing MP4 automatically",
     tone: "watchable-pending",
   };
 }
@@ -909,49 +883,17 @@ function renderRecordings(recordings) {
       exportCell.append(exportError);
     }
 
-    const downloadCleanButton = document.createElement("button");
-    downloadCleanButton.className = "secondary";
-    if (isPreparing) {
-      downloadCleanButton.textContent = "Preparing...";
-    } else if (isRecording) {
-      downloadCleanButton.textContent = "Recording...";
-    } else if (!hasCleanContent) {
-      downloadCleanButton.textContent = "No clean content";
+    const exportDirectory = document.createElement("div");
+    exportDirectory.className = "recording-meta recording-path";
+    if (recording.clean_export_dir_path) {
+      const directoryLabel = isReady ? "MP4 Directory" : "Export Directory";
+      exportDirectory.textContent = `${directoryLabel}: ${recording.clean_export_dir_path}`;
+    } else if (isSegmentNative) {
+      exportDirectory.textContent = "Export Directory: pending";
     } else {
-      downloadCleanButton.textContent = "Download Clean MP4";
+      exportDirectory.textContent = "Export Directory: N/A";
     }
-    downloadCleanButton.disabled = !isSegmentNative || isPreparing || isRecording || !hasCleanContent;
-    downloadCleanButton.addEventListener("click", async () => {
-      if (!recording.recording_id) {
-        showToast("Recording id is missing");
-        return;
-      }
-      if (!hasCleanContent) {
-        showToast("No clean content is available for this recording");
-        return;
-      }
-      if (isReady) {
-        triggerDownload(`/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-mp4`);
-        return;
-      }
-      downloadCleanButton.disabled = true;
-      downloadCleanButton.textContent = "Preparing...";
-      try {
-        await request(`/recordings/${encodeURIComponent(recording.recording_id)}/exports/clean-mp4`, {
-          method: "POST",
-        });
-        showToast(`Preparing Clean MP4 for ${recording.channel}`);
-        await refreshRecordings();
-        await waitForCleanExportReady(recording.recording_id);
-        await refreshRecordings();
-        triggerDownload(`/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-mp4`);
-      } catch (error) {
-        downloadCleanButton.disabled = false;
-        downloadCleanButton.textContent = "Download Clean MP4";
-        showToast(error.message);
-      }
-    });
-    exportCell.append(downloadCleanButton);
+    exportCell.append(exportDirectory);
 
     const modifiedCell = document.createElement("td");
     modifiedCell.textContent = formatDate(recording.modified_at);

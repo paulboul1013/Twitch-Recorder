@@ -578,6 +578,13 @@ td button {
   font-size: 0.82rem;
 }
 
+.recording-path {
+  font-family: var(--mono);
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .watchable-status {
   display: inline-block;
   border-radius: 999px;
