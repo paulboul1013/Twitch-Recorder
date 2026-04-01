@@ -24,7 +24,7 @@ It is useful for these situations:
 - Keep a short offline grace period before automatically stopping the recording
 - Manually start or stop recording while the stream is live
 - See who is currently live, who is being recorded, and the current recording status
-- View recently recorded files and downloadable clean video outputs
+- View recent recordings, clean MP4 auto-conversion status, and the MP4 output directory
 
 ## What You Need Before Starting
 
@@ -114,7 +114,7 @@ docker compose up -d --build
 
   ![Recording details](./docs/readme/recording-details.jpg)
 
-- Recording list: the latest 5 recordings with channel name, file status, and download buttons
+- Recording list: the latest 5 recordings with channel name, file status, and the MP4 output directory
 
   ![Recording list](./docs/readme/recordings-list.jpg)
 
@@ -122,11 +122,17 @@ docker compose up -d --build
 
 All recording data is stored under folders in the project root:
 
-- `recordings/<recording_id>/`: one recording session directory
-- `recordings/<recording_id>/exports/`: exported video files
-- `recordings/<recording_id>/recording.meta.json`: metadata for one recording session
+- `recordings/<streamer>/<recording_id>/`: one recording session directory
+- `recordings/<streamer>/<recording_id>/exports/`: exported video files, including the auto-generated clean MP4
+- `recordings/<streamer>/<recording_id>/recording.meta.json`: metadata for one recording session
 - `config/streamers.json`: monitored streamer settings (including `enabled_for_recording`)
 - `config/recordings.json`: recording history index
+
+In `segment_native` mode, the system now auto-converts the clean output to MP4 in the background after a recording session ends. The dashboard recording list shows:
+
+- whether the clean MP4 is still processing
+- whether the clean MP4 is ready
+- the `exports/` directory path where the MP4 is stored
 
 ## Ad Mitigation (Hybrid Mode)
 

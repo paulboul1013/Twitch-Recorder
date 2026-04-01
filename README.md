@@ -24,7 +24,7 @@ English users: see [README_EN.md](./README_EN.md).
 - 直播結束後保留短暫寬限期，再自動停止錄影
 - 直播中可手動開始或停止錄影
 - 查看目前誰正在直播、誰正在錄影，以及目前錄影狀態
-- 查看最近錄好的影片檔案與可下載的乾淨影片
+- 查看最近錄好的影片檔案、clean MP4 自動轉檔狀態，以及 MP4 所在目錄
 
 ## 使用前要準備什麼
 
@@ -114,7 +114,7 @@ docker compose up -d --build
 
   ![錄影細節](./docs/readme/recording-details.jpg)
 
-- 錄影列表：最新 5 筆錄影的頻道、影片狀態與下載按鈕
+- 錄影列表：最新 5 筆錄影的頻道、影片狀態與 MP4 輸出目錄
 
   ![錄影列表](./docs/readme/recordings-list.jpg)
 
@@ -122,11 +122,17 @@ docker compose up -d --build
 
 所有錄影資料都會存在專案根目錄對應的資料夾：
 
-- `recordings/<recording_id>/`：單次錄影資料夾
-- `recordings/<recording_id>/exports/`：匯出的影片檔
-- `recordings/<recording_id>/recording.meta.json`：單次錄影 metadata
+- `recordings/<streamer>/<recording_id>/`：單次錄影資料夾
+- `recordings/<streamer>/<recording_id>/exports/`：匯出的影片檔，包含自動產生的 clean MP4
+- `recordings/<streamer>/<recording_id>/recording.meta.json`：單次錄影 metadata
 - `config/streamers.json`：監看主播設定（含 `enabled_for_recording`）
 - `config/recordings.json`：錄影歷史索引
+
+目前 `segment_native` 模式下，錄影結束後會自動在背景將 clean 輸出轉成 MP4。管理畫面的錄影列表會顯示：
+
+- clean MP4 是否仍在處理中
+- clean MP4 是否已完成
+- clean MP4 所在的 `exports/` 目錄路徑
 
 ## 廣告緩解（Hybrid 模式）
 
