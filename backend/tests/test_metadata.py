@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -122,6 +123,60 @@ def test_start_recording_groups_segment_native_outputs_under_channel_directory(t
     assert (recording_root / "manifests").is_dir()
     assert (recording_root / "exports").is_dir()
     recorder.stop_all()
+
+
+def test_resume_segment_native_recording_reuses_directory_and_continues_segment_numbering(
+    tmp_path: Path,
+) -> None:
+    recorder = RecorderManager(tmp_path, ("best",), recording_mode="segment_native")
+
+    class FakeStdoutProcess(FakeProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stdout = io.BytesIO()
+
+    stream_process = FakeStdoutProcess()
+    segmenter_process = FakeProcess()
+    resumed_stream_process = FakeStdoutProcess()
+    resumed_segmenter_process = FakeProcess()
+
+    with (
+        patch.object(RecorderManager, "_start_playlist_ad_window_tracking", autospec=True),
+        patch.object(RecorderManager, "_stop_playlist_ad_window_tracking", autospec=True),
+        patch(
+            "app.recorder.subprocess.Popen",
+            side_effect=[
+                stream_process,
+                segmenter_process,
+                resumed_stream_process,
+                resumed_segmenter_process,
+            ],
+        ) as popen,
+    ):
+        output_path = Path(recorder.start_recording("alpha"))
+        recording_root = output_path.parent.parent
+        (recording_root / "segments" / "segment_000000.ts").write_bytes(b"a")
+        (recording_root / "segments" / "segment_000001.ts").write_bytes(b"b")
+
+        stream_process.returncode = 0
+        segmenter_process.returncode = 0
+        assert recorder.poll() == []
+        assert recorder.has_session("alpha") is True
+        assert recorder.is_recording("alpha") is False
+
+        resumed_path = Path(recorder.resume_recording("alpha") or "")
+
+    assert resumed_path == output_path
+    assert recording_root.parent == tmp_path / "alpha"
+    segmenter_calls = [
+        call.args[0]
+        for call in popen.call_args_list
+        if call.args and isinstance(call.args[0], list) and call.args[0] and call.args[0][0] == "ffmpeg"
+    ]
+    resumed_segmenter_cmd = segmenter_calls[-1]
+    assert "-segment_start_number" in resumed_segmenter_cmd
+    start_index = resumed_segmenter_cmd.index("-segment_start_number")
+    assert resumed_segmenter_cmd[start_index + 1] == "2"
 
 
 def test_metadata_ready_state_includes_strategy_and_detection_sources(tmp_path: Path) -> None:

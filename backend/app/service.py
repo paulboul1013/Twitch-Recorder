@@ -329,7 +329,7 @@ class MonitorService:
             )
 
     async def _handle_offline_recording(self, name: str, status: StreamStatus, now: datetime) -> None:
-        if not self.recorder.is_recording(name):
+        if not self.recorder.has_session(name):
             status.is_recording = False
             status.stop_after_at = None
             return
@@ -1154,7 +1154,7 @@ class MonitorService:
                 continue
 
             if not self._is_recording_enabled(name):
-                if self.recorder.is_recording(name):
+                if self.recorder.has_session(name):
                     async with self._recorder_lock:
                         result = self.recorder.stop_recording(name)
                     if result is not None:
@@ -1164,7 +1164,7 @@ class MonitorService:
                 status.last_error = None
                 continue
 
-            if not self.recorder.is_recording(name):
+            if not self.recorder.has_session(name):
                 remaining_start_delay = self._start_delay_remaining_seconds(
                     live.started_at,
                     now=now,
@@ -1176,7 +1176,18 @@ class MonitorService:
                     continue
 
             can_start = self.recorder.active_count() < self.settings.max_concurrent_streamers
-            if not self.recorder.is_recording(name) and can_start:
+            if self.recorder.has_session(name) and not self.recorder.is_recording(name):
+                try:
+                    output_path = self.recorder.resume_recording(name)
+                    if output_path is not None:
+                        status.output_path = output_path
+                        status.recording_state = "recording"
+                        status.recording_ended_at = None
+                        status.recording_exit_code = None
+                        status.last_error = None
+                except OSError as exc:
+                    status.last_error = str(exc)
+            elif not self.recorder.has_session(name) and can_start:
                 try:
                     output_path = self.recorder.start_recording(name)
                     status.output_path = output_path

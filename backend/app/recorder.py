@@ -99,6 +99,10 @@ class RecorderManager:
             segment_verify_neighbor_seconds=self.SEGMENT_VERIFY_NEIGHBOR_SECONDS,
         )
 
+    def has_session(self, channel: str) -> bool:
+        with self._state_lock:
+            return channel in self._active
+
     def is_recording(self, channel: str) -> bool:
         with self._state_lock:
             recording = self._active.get(channel)
@@ -268,74 +272,11 @@ class RecorderManager:
             metadata_path = output_path.with_suffix(".meta.json")
             full_artifact_path = output_path
 
-        segmenter_process: subprocess.Popen | None = None
-        if self.recording_mode == "segment_native":
-            cmd, source_mode = build_streamlink_command(
-                channel=channel,
-                output_path=None,
-                preferred_qualities=self.preferred_qualities,
-                twitch_user_oauth_token=self.twitch_user_oauth_token,
-                raw_container=self.recording_raw_container,
-                output_to_stdout=True,
-            )
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-            )
-            stream_stdout = getattr(process, "stdout", None)
-            if hasattr(process, "stdout") and stream_stdout is None:
-                process.kill()
-                raise OSError("failed to initialize streamlink stdout pipe for segment pipeline")
-
-            if stream_stdout is not None:
-                segment_pattern = str((recording_root / "segments" / "segment_%06d.ts").resolve())
-                segment_cmd = [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    "pipe:0",
-                    "-c",
-                    "copy",
-                    "-f",
-                    "segment",
-                    "-segment_format",
-                    "mpegts",
-                    "-segment_time",
-                    f"{self.SEGMENT_DURATION_SECONDS}",
-                    "-reset_timestamps",
-                    "1",
-                    segment_pattern,
-                ]
-                segmenter_process = subprocess.Popen(
-                    segment_cmd,
-                    stdin=stream_stdout,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                stream_stdout.close()
-        else:
-            cmd, source_mode = build_streamlink_command(
-                channel=channel,
-                output_path=output_path,
-                preferred_qualities=self.preferred_qualities,
-                twitch_user_oauth_token=self.twitch_user_oauth_token,
-                raw_container=self.recording_raw_container,
-            )
-
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-            )
+        process, segmenter_process, source_mode = self._spawn_recording_processes(
+            channel=channel,
+            output_path=output_path,
+            recording_root=recording_root,
+        )
 
         started_at = datetime.now(UTC)
         recording = ActiveRecording(
@@ -381,6 +322,57 @@ class RecorderManager:
         with self._state_lock:
             self._active[channel] = recording
         return str(output_path)
+
+    def resume_recording(self, channel: str) -> str | None:
+        self._reap_finished_processes()
+        with self._state_lock:
+            recording = self._active.get(channel)
+        if recording is None:
+            return None
+        if self._is_recording_running(recording):
+            return str(recording.file_path)
+        if recording.artifact_mode != "segment_native":
+            return None
+
+        self._join_stderr_thread(recording)
+        process, segmenter_process, source_mode = self._spawn_recording_processes(
+            channel=recording.channel,
+            output_path=recording.file_path,
+            recording_root=recording.recording_root,
+        )
+        recording.process = process
+        recording.segmenter_process = segmenter_process
+        recording.source_mode = source_mode
+        recording.stderr_thread = self._start_stderr_thread(recording)
+        self._append_event(recording, "recording_resumed")
+        full_segment_count = (
+            self._count_segment_files(recording.recording_root)
+            if recording.recording_root is not None
+            else 0
+        )
+        self._write_metadata(
+            recording=recording,
+            ended_at=None,
+            exit_code=None,
+            state="recording",
+            full_artifact_path=str(recording.full_artifact_path) if recording.full_artifact_path else None,
+            clean_artifact_path=str(recording.clean_artifact_path) if recording.clean_artifact_path else None,
+            full_segment_count=full_segment_count,
+            clean_segment_count=0,
+            clean_export_state="none",
+            clean_export_path=None,
+            clean_export_error=None,
+            clean_compact_state="none",
+            clean_compact_path=None,
+            clean_compact_error=None,
+            unknown_ad_confidence=False,
+            clean_output_path=None,
+            clean_output_state="pending",
+            clean_output_error=None,
+            watchable_processing_seconds=None,
+            source_available=recording.file_path.exists(),
+        )
+        return str(recording.file_path)
 
     def stop_recording(self, channel: str, *, wait_for_finalize: bool = False) -> RecordingResult | None:
         self._reap_finished_processes()
@@ -451,11 +443,13 @@ class RecorderManager:
                 thread.join()
 
     def _reap_finished_processes(self) -> None:
+        dormant_recordings: list[ActiveRecording] = []
         with self._state_lock:
             finished_channels = [
                 channel
                 for channel, recording in self._active.items()
                 if self._is_recording_finished(recording)
+                and recording.artifact_mode != "segment_native"
             ]
             broken_segmenter_channels = [
                 channel
@@ -464,6 +458,11 @@ class RecorderManager:
                 and recording.segmenter_process is not None
                 and recording.segmenter_process.poll() is not None
                 and recording.process.poll() is None
+            ]
+            dormant_recordings = [
+                recording
+                for recording in self._active.values()
+                if recording.artifact_mode == "segment_native" and self._is_recording_finished(recording)
             ]
             finished_recordings = [
                 self._active.pop(channel)
@@ -474,6 +473,9 @@ class RecorderManager:
                 recording = self._active.get(channel)
                 if recording is not None and recording.process.poll() is None:
                     recording.process.terminate()
+
+        for recording in dormant_recordings:
+            self._join_stderr_thread(recording)
 
         for recording in finished_recordings:
             self._stop_playlist_ad_window_tracking(recording)
@@ -514,8 +516,105 @@ class RecorderManager:
     def _join_stderr_thread(self, recording: ActiveRecording) -> None:
         if recording.stderr_thread is not None:
             recording.stderr_thread.join(timeout=2)
+            recording.stderr_thread = None
         if recording.process.stderr is not None:
             recording.process.stderr.close()
+
+    def _spawn_recording_processes(
+        self,
+        *,
+        channel: str,
+        output_path: Path,
+        recording_root: Path | None,
+    ) -> tuple[subprocess.Popen, subprocess.Popen | None, str]:
+        segmenter_process: subprocess.Popen | None = None
+        if self.recording_mode == "segment_native":
+            cmd, source_mode = build_streamlink_command(
+                channel=channel,
+                output_path=None,
+                preferred_qualities=self.preferred_qualities,
+                twitch_user_oauth_token=self.twitch_user_oauth_token,
+                raw_container=self.recording_raw_container,
+                output_to_stdout=True,
+            )
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            stream_stdout = getattr(process, "stdout", None)
+            if hasattr(process, "stdout") and stream_stdout is None:
+                process.kill()
+                raise OSError("failed to initialize streamlink stdout pipe for segment pipeline")
+
+            if stream_stdout is not None:
+                if recording_root is None:
+                    process.kill()
+                    raise OSError("segment-native recording root is missing")
+                segment_pattern = str((recording_root / "segments" / "segment_%06d.ts").resolve())
+                segment_cmd = [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    "pipe:0",
+                    "-c",
+                    "copy",
+                    "-f",
+                    "segment",
+                    "-segment_format",
+                    "mpegts",
+                    "-segment_time",
+                    f"{self.SEGMENT_DURATION_SECONDS}",
+                    "-segment_start_number",
+                    str(self._next_segment_start_number(recording_root)),
+                    "-reset_timestamps",
+                    "1",
+                    segment_pattern,
+                ]
+                segmenter_process = subprocess.Popen(
+                    segment_cmd,
+                    stdin=stream_stdout,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                stream_stdout.close()
+        else:
+            cmd, source_mode = build_streamlink_command(
+                channel=channel,
+                output_path=output_path,
+                preferred_qualities=self.preferred_qualities,
+                twitch_user_oauth_token=self.twitch_user_oauth_token,
+                raw_container=self.recording_raw_container,
+            )
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+        return process, segmenter_process, source_mode
+
+    def _next_segment_start_number(self, recording_root: Path) -> int:
+        segments_dir = recording_root / "segments"
+        highest_segment = -1
+        for segment_file in segments_dir.glob("segment_*.ts"):
+            suffix = segment_file.stem.removeprefix("segment_")
+            try:
+                highest_segment = max(highest_segment, int(suffix))
+            except ValueError:
+                continue
+        return highest_segment + 1
+
+    def _count_segment_files(self, recording_root: Path) -> int:
+        return sum(1 for _ in (recording_root / "segments").glob("segment_*.ts"))
 
     def _start_playlist_ad_window_tracking(self, recording: ActiveRecording) -> None:
         recording.playlist_stop_event.clear()

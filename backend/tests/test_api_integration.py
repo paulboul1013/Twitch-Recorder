@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,11 +11,14 @@ import httpx
 
 from app.api_integration import build_streamlink_command
 from app.clean_export import CleanExportJob
+from app.config import Settings
 from app.models import StreamStatus
 from app.recorder import RecorderManager
 from app.recording_types import RecordingResult
 from app.service import MonitorService
 from app.store import TrackedRecording
+from app.store import RecordingHistoryStore, StreamerStore
+from app.twitch import TwitchClient
 from conftest import FakeProcess, _load_metadata, _status_for, build_test_client, build_test_service
 
 def test_add_list_and_delete_streamers(tmp_path: Path) -> None:
@@ -1347,3 +1351,86 @@ def test_old_finalize_result_does_not_override_new_active_recording_status(tmp_p
     assert alpha.output_path == second_output
 
     service.recorder.stop_all(wait_for_finalize=True)
+
+
+def test_live_refresh_resumes_segment_native_recording_in_same_directory(tmp_path: Path) -> None:
+    settings = Settings(
+        poll_interval_seconds=999,
+        recording_start_delay_seconds=0,
+        recordings_path=tmp_path / "recordings",
+        config_path=tmp_path / "config",
+    )
+    settings.ensure_directories()
+    service = MonitorService(
+        settings=settings,
+        store=StreamerStore(settings.streamers_file),
+        recording_store=RecordingHistoryStore(settings.recordings_file),
+        twitch_client=TwitchClient("", ""),
+        recorder=RecorderManager(
+            settings.recordings_path,
+            settings.preferred_qualities,
+            recording_mode="segment_native",
+        ),
+    )
+    service._streamers = ["alpha"]
+    service._statuses["alpha"] = StreamStatus(name="alpha")
+
+    class FakeLiveStream:
+        title = "Live now"
+        game_name = "Just Chatting"
+        viewer_count = 10
+        started_at = datetime.now(UTC)
+
+    class FakeStdoutProcess(FakeProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stdout = io.BytesIO()
+
+    async def fake_get_live_streams(usernames):
+        return {"alpha": FakeLiveStream()}
+
+    async def fake_get_users(usernames):
+        return {}
+
+    service.twitch_client.get_live_streams = fake_get_live_streams
+    service.twitch_client.get_users = fake_get_users
+
+    stream_process = FakeStdoutProcess()
+    segmenter_process = FakeProcess()
+    resumed_stream_process = FakeStdoutProcess()
+    resumed_segmenter_process = FakeProcess()
+
+    with (
+        patch.object(RecorderManager, "_start_playlist_ad_window_tracking", autospec=True),
+        patch.object(RecorderManager, "_stop_playlist_ad_window_tracking", autospec=True),
+        patch(
+            "app.recorder.subprocess.Popen",
+            side_effect=[
+                stream_process,
+                segmenter_process,
+                resumed_stream_process,
+                resumed_segmenter_process,
+            ],
+        ),
+    ):
+        asyncio.run(service.refresh_once())
+        first_snapshot = service.recorder.list_active_recordings()
+        assert len(first_snapshot) == 1
+        first_recording_id = first_snapshot[0]["recording_id"]
+        first_output_path = service.recorder.current_output_path("alpha")
+        assert first_output_path is not None
+
+        recording_root = Path(first_output_path).parent.parent
+        (recording_root / "segments" / "segment_000000.ts").write_bytes(b"a")
+        stream_process.returncode = 0
+        segmenter_process.returncode = 0
+
+        asyncio.run(service.refresh_once())
+
+        second_snapshot = service.recorder.list_active_recordings()
+        assert len(second_snapshot) == 1
+        assert second_snapshot[0]["recording_id"] == first_recording_id
+        assert service.recorder.current_output_path("alpha") == first_output_path
+
+    channel_dirs = [path for path in (settings.recordings_path / "alpha").iterdir() if path.is_dir()]
+    assert len(channel_dirs) == 1
