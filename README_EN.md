@@ -2,7 +2,7 @@
 
 Chinese users: see [README.md](./README.md).
 
-![Twitch Recorder Demo](./docs/readme/show_demo.png)
+![alt text](image_front.png)
 
 This project helps you automatically monitor Twitch streamers and start recording as soon as they go live, so you do not have to keep checking stream schedules manually.
 
@@ -100,23 +100,23 @@ docker compose up -d --build
 
 - Header summary: how many channels are recording, live, and being monitored
 
-  ![Header summary](./docs/readme/header-summary.jpg)
+  ![Header summary (new UI)](./docs/readme/header-summary-new.png)
 
-- Watch list: streamer names, and when you click a name you can choose recording directories to delete; deleting removes that entire time-based recording directory
+- Watch list: streamer names, Auto Record status, and action buttons
 
-  ![Watch list](./docs/readme/monitored-streamers.jpg)
+  ![Watch list (new UI)](./docs/readme/monitored-streamers-new.png)
 
 - Live cards: avatar, live status, recording status, title, category, viewer count
 
-  ![Live cards](./docs/readme/live-status-card.jpg)
+  ![Live cards (new UI)](./docs/readme/live-status-card-new.png)
 
 - Recording details: stream start time, last check time, offline time, stop deadline, output path, error message
 
-  ![Recording details](./docs/readme/recording-details.jpg)
+  ![Recording details (new UI)](./docs/readme/recording-details-new.png)
 
-- Recording list: the latest 5 recordings with channel name, file status, and the MP4 output directory
+- Recent Recordings: latest recording entries, processing state, and output directory
 
-  ![Recording list](./docs/readme/recordings-list.jpg)
+  ![Recording list (new UI)](./docs/readme/recordings-list-new.png)
 
 ## Where Recorded Files Are Stored
 

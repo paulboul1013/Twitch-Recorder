@@ -2,8 +2,6 @@
 
 English users: see [README_EN.md](./README_EN.md).
 
-![Twitch Recorder 展示畫面](./docs/readme/show_demo.png)
-
 這個專案可以幫你自動監看 Twitch 主播，只要對方一開播，就自動開始錄影，讓你不用一直自己盯著直播時間。
 
 適合這些使用情境：
@@ -99,24 +97,20 @@ docker compose up -d --build
 ## 管理畫面可以看到什麼
 
 - 頁首摘要：目前錄影中、直播中、監看中的主播數量
-  
-  ![頁首摘要](./docs/readme/header-summary.jpg)
 
-- 監看名單：主播名稱，點選後可選要刪除的紀錄檔，切記是該時間紀錄檔目錄都被刪除
+  ![頁首摘要（新介面）](./docs/readme/header-summary-new.png)
 
-  ![監看名單](./docs/readme/monitored-streamers.jpg)
+- 監看名單：主播名稱、Auto Record 狀態與操作按鈕
 
-- 直播卡片：頭像、直播狀態、錄影狀態、標題、分類、觀看人數
+  ![監看名單（新介面）](./docs/readme/monitored-streamers-new.png)
 
-  ![直播卡片](./docs/readme/live-status-card.jpg)
+- 直播狀態卡片：頭像、直播狀態、錄影狀態、標題、分類、觀看人數
 
-- 錄影細節：直播開始時間、最後檢查時間、離線時間、停止截止時間、輸出路徑、錯誤訊息
+  ![直播卡片（新介面）](./docs/readme/live-status-card-new.png)
 
-  ![錄影細節](./docs/readme/recording-details.jpg)
+- Recent Recordings：最新錄影紀錄、處理狀態與輸出目錄
 
-- 錄影列表：最新 5 筆錄影的頻道、影片狀態與 MP4 輸出目錄
-
-  ![錄影列表](./docs/readme/recordings-list.jpg)
+  ![錄影列表（新介面）](./docs/readme/recordings-list-new.png)
 
 ## 錄好的影片會放在哪裡
 
