@@ -4,6 +4,8 @@ English users: see [README_EN.md](./README_EN.md).
 
 這個專案可以幫你自動監看 Twitch 主播，只要對方一開播，就自動開始錄影，讓你不用一直自己盯著直播時間。
 
+![前端管理畫面簡單示範](./image_front.png)
+
 適合這些使用情境：
 
 - 自動保存特定 Twitch 主播直播內容
