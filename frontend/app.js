@@ -1,47 +1,52 @@
-const pollingEnabledKey = "twitch-recorder-auto-refresh-enabled";
 const pollIntervalMs = 15000;
 const apiBaseUrl = "/api";
+const highlightDurationMs = 1800;
 
 const state = {
-  pollingEnabled: localStorage.getItem(pollingEnabledKey) !== "false",
-  pollingCountdownSeconds: Math.floor(pollIntervalMs / 1000),
   pollingTimerId: null,
-  pollingCountdownId: null,
   recordingsFollowupTimerId: null,
   refreshInFlight: false,
-  statusCarouselIndex: 0,
-  statusFocusName: null,
   streamers: [],
+  statuses: [],
+  recordings: [],
   expandedStreamerName: null,
   streamerDirectoryEntriesByName: {},
   streamerDirectorySelectionsByName: {},
   streamerDirectoryLoadingName: null,
   streamerDirectoryDeletingName: null,
+  statusFilter: "active",
+  recordingFilter: "all",
+  recordingSort: "modified_desc",
+  highlightedRecordingIds: new Set(),
+  highlightResetTimerId: null,
 };
 
 const elements = {
-  togglePolling: document.querySelector("#togglePolling"),
-  pollingStatus: document.querySelector("#pollingStatus"),
-  refreshAll: document.querySelector("#refreshAll"),
+  summaryActive: document.querySelector("#summaryActive"),
+  summaryActiveMeta: document.querySelector("#summaryActiveMeta"),
+  summaryRecording: document.querySelector("#summaryRecording"),
+  summaryRecordingMeta: document.querySelector("#summaryRecordingMeta"),
+  summaryAdBreaks: document.querySelector("#summaryAdBreaks"),
+  summaryAdBreaksMeta: document.querySelector("#summaryAdBreaksMeta"),
+  summaryExports: document.querySelector("#summaryExports"),
+  summaryExportsMeta: document.querySelector("#summaryExportsMeta"),
   streamerForm: document.querySelector("#streamerForm"),
   streamerName: document.querySelector("#streamerName"),
+  streamerCount: document.querySelector("#streamerCount"),
+  streamersLabel: document.querySelector("#streamersLabel"),
   streamersList: document.querySelector("#streamersList"),
   streamersEmpty: document.querySelector("#streamersEmpty"),
-  streamerCount: document.querySelector("#streamerCount"),
-  summaryRecording: document.querySelector("#summaryRecording"),
-  summaryLive: document.querySelector("#summaryLive"),
-  summaryMonitored: document.querySelector("#summaryMonitored"),
-  refreshStatus: document.querySelector("#refreshStatus"),
-  statusCards: document.querySelector("#statusCards"),
-  statusEmpty: document.querySelector("#statusEmpty"),
-  refreshRecordings: document.querySelector("#refreshRecordings"),
+  statusFilters: document.querySelector("#statusFilters"),
+  focusGrid: document.querySelector("#focusGrid"),
+  focusEmpty: document.querySelector("#focusEmpty"),
+  recordingFilters: document.querySelector("#recordingFilters"),
+  recordingSort: document.querySelector("#recordingSort"),
   recordingsTable: document.querySelector("#recordingsTable"),
   recordingsBody: document.querySelector("#recordingsTable tbody"),
+  recordingsCards: document.querySelector("#recordingsCards"),
   recordingsEmpty: document.querySelector("#recordingsEmpty"),
   toast: document.querySelector("#toast"),
 };
-
-let textMeasureCanvas = null;
 
 async function request(path, options = {}) {
   const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -56,8 +61,8 @@ async function request(path, options = {}) {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
-      const data = await response.json();
-      detail = data.detail || detail;
+      const payload = await response.json();
+      detail = payload.detail || detail;
     } catch (_) {
       // Keep the generic message when the payload is not JSON.
     }
@@ -75,75 +80,22 @@ function showToast(message) {
   elements.toast.textContent = message;
   elements.toast.hidden = false;
   clearTimeout(showToast.timeoutId);
-  showToast.timeoutId = setTimeout(() => {
+  showToast.timeoutId = window.setTimeout(() => {
     elements.toast.hidden = true;
   }, 2600);
 }
 
-function setPollingLabel() {
-  elements.togglePolling.textContent = state.pollingEnabled ? "Pause Auto Refresh" : "Resume Auto Refresh";
-  if (!state.pollingEnabled) {
-    elements.pollingStatus.textContent = "Auto refresh paused";
-    return;
-  }
-  if (document.hidden) {
-    elements.pollingStatus.textContent = "Auto refresh paused while tab is hidden";
-    return;
-  }
-  if (state.refreshInFlight) {
-    elements.pollingStatus.textContent = "Refreshing now...";
-    return;
-  }
-  elements.pollingStatus.textContent = `Auto refresh in ${state.pollingCountdownSeconds}s`;
+function parseDate(value) {
+  const timestamp = Date.parse(value || "");
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function stopPollingLoop() {
-  clearInterval(state.pollingTimerId);
-  clearInterval(state.pollingCountdownId);
-  state.pollingTimerId = null;
-  state.pollingCountdownId = null;
-}
-
-async function runAutoRefresh() {
-  if (!state.pollingEnabled || document.hidden || state.refreshInFlight) {
-    return;
+function isRecent(value, hours = 24) {
+  const timestamp = parseDate(value);
+  if (!timestamp) {
+    return false;
   }
-  try {
-    await refreshAllData({ silent: true });
-  } catch (error) {
-    showToast(error.message);
-  }
-}
-
-function startPollingLoop() {
-  stopPollingLoop();
-  state.pollingCountdownSeconds = Math.floor(pollIntervalMs / 1000);
-  setPollingLabel();
-  if (!state.pollingEnabled) {
-    return;
-  }
-
-  state.pollingCountdownId = window.setInterval(() => {
-    if (!state.pollingEnabled) {
-      return;
-    }
-    if (document.hidden || state.refreshInFlight) {
-      setPollingLabel();
-      return;
-    }
-    state.pollingCountdownSeconds = Math.max(0, state.pollingCountdownSeconds - 1);
-    setPollingLabel();
-  }, 1000);
-
-  state.pollingTimerId = window.setInterval(async () => {
-    if (!state.pollingEnabled || document.hidden) {
-      setPollingLabel();
-      return;
-    }
-    state.pollingCountdownSeconds = Math.floor(pollIntervalMs / 1000);
-    setPollingLabel();
-    await runAutoRefresh();
-  }, pollIntervalMs);
+  return Date.now() - timestamp <= hours * 60 * 60 * 1000;
 }
 
 function formatDate(value) {
@@ -154,6 +106,31 @@ function formatDate(value) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function formatRelativeTime(value) {
+  if (!value) {
+    return "N/A";
+  }
+  const deltaMs = Date.now() - parseDate(value);
+  if (!Number.isFinite(deltaMs) || deltaMs < 0) {
+    return formatDate(value);
+  }
+
+  const totalSeconds = Math.round(deltaMs / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s ago`;
+  }
+  const totalMinutes = Math.round(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m ago`;
+  }
+  const totalHours = Math.round(totalMinutes / 60);
+  if (totalHours < 48) {
+    return `${totalHours}h ago`;
+  }
+  const totalDays = Math.round(totalHours / 24);
+  return `${totalDays}d ago`;
 }
 
 function formatBytes(value) {
@@ -178,7 +155,9 @@ function formatState(value) {
   if (!value) {
     return "N/A";
   }
-  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  return String(value)
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function normalizeRecordingState(recordingState) {
@@ -197,6 +176,144 @@ function toFileName(pathValue) {
   }
   const parts = String(pathValue).split("/");
   return parts[parts.length - 1] || "N/A";
+}
+
+function hasStatusError(status) {
+  const recordingState = String(status.recording_state || "").toLowerCase();
+  const exitCode = Number(status.recording_exit_code);
+  return Boolean(
+    status.last_error
+    || recordingState.includes("error")
+    || recordingState.includes("failed")
+    || (Number.isFinite(exitCode) && exitCode > 0 && exitCode !== 130 && recordingState !== "disabled"),
+  );
+}
+
+function getLiveFocusStatuses(statuses) {
+  switch (state.statusFilter) {
+    case "live":
+      return statuses.filter((status) => status.is_live);
+    case "recording":
+      return statuses.filter((status) => status.is_recording);
+    case "failed":
+      return statuses.filter(hasStatusError);
+    case "all":
+      return statuses;
+    case "active":
+    default:
+      return statuses.filter((status) => status.is_live || status.is_recording || hasStatusError(status));
+  }
+}
+
+function getRecordingError(recording) {
+  return (
+    recording.clean_export_error
+    || recording.clean_compact_error
+    || recording.clean_output_error
+    || null
+  );
+}
+
+function getRecordingStatus(recording) {
+  if (recording.is_recording) {
+    return {
+      tone: "recording",
+      label: "Recording",
+      summary: "Capture in progress",
+    };
+  }
+
+  const exportState = String(recording.clean_export_state || "none").toLowerCase();
+  const compactState = String(recording.clean_compact_state || "none").toLowerCase();
+  const hasError = Boolean(getRecordingError(recording));
+
+  if (exportState === "failed" || compactState === "failed" || hasError) {
+    return {
+      tone: "failed",
+      label: "Failed",
+      summary: "Export or clean pipeline failed",
+    };
+  }
+
+  if (
+    exportState === "queued"
+    || exportState === "processing"
+    || compactState === "queued"
+    || compactState === "processing"
+  ) {
+    return {
+      tone: "processing",
+      label: "Processing",
+      summary: "Preparing clean output",
+    };
+  }
+
+  if (exportState === "ready" || compactState === "ready") {
+    return {
+      tone: "ready",
+      label: "Ready",
+      summary: "MP4 export ready",
+    };
+  }
+
+  if (recording.watchable_available || recording.artifact_mode !== "segment_native") {
+    return {
+      tone: "ready",
+      label: "Ready",
+      summary: recording.artifact_mode === "segment_native" ? "Watchable artifact ready" : "Legacy artifact ready",
+    };
+  }
+
+  if (Number(recording.clean_segment_count || 0) <= 0 && recording.artifact_mode === "segment_native") {
+    return {
+      tone: "warning",
+      label: "No Clean Content",
+      summary: "No ad-free segments available",
+    };
+  }
+
+  return {
+    tone: "neutral",
+    label: "Pending",
+    summary: "Waiting for export state",
+  };
+}
+
+function shouldAllowMp4Export(recording) {
+  if (recording.is_recording || recording.artifact_mode !== "segment_native") {
+    return false;
+  }
+  return Number(recording.clean_segment_count || 0) > 0;
+}
+
+function getActiveRecordingForChannel(channel) {
+  return state.recordings.find((recording) => recording.channel === channel && recording.is_recording) || null;
+}
+
+function stopPollingLoop() {
+  clearInterval(state.pollingTimerId);
+  state.pollingTimerId = null;
+}
+
+async function runAutoRefresh() {
+  if (document.hidden || state.refreshInFlight) {
+    return;
+  }
+  try {
+    await refreshAllData({ silent: true });
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function startPollingLoop() {
+  stopPollingLoop();
+  state.pollingTimerId = window.setInterval(async () => {
+    if (document.hidden) {
+      return;
+    }
+    await runAutoRefresh();
+  }, pollIntervalMs);
 }
 
 function scheduleRecordingsFollowupRefresh() {
@@ -220,54 +337,39 @@ function clearRecordingsFollowupRefresh() {
   }
 }
 
-function getCleanExportStatus(recording) {
-  if (recording.is_recording) {
-    return {
-      text: "Recording",
-      tone: "watchable-pending",
-    };
+function clearRecordingHighlightsLater() {
+  clearTimeout(state.highlightResetTimerId);
+  state.highlightResetTimerId = window.setTimeout(() => {
+    state.highlightedRecordingIds.clear();
+    renderRecordings();
+  }, highlightDurationMs);
+}
+
+function markUpdatedRecordings(previousRecordings, nextRecordings) {
+  const previousById = new Map(previousRecordings.map((recording) => [recording.recording_id, recording]));
+  const changedIds = new Set();
+
+  for (const recording of nextRecordings) {
+    const previous = previousById.get(recording.recording_id);
+    if (!previous) {
+      changedIds.add(recording.recording_id);
+      continue;
+    }
+    if (
+      previous.modified_at !== recording.modified_at
+      || previous.is_recording !== recording.is_recording
+      || previous.clean_export_state !== recording.clean_export_state
+      || previous.clean_compact_state !== recording.clean_compact_state
+      || getRecordingError(previous) !== getRecordingError(recording)
+    ) {
+      changedIds.add(recording.recording_id);
+    }
   }
-  if (recording.artifact_mode !== "segment_native") {
-    return {
-      text: "Legacy recording",
-      tone: "watchable-ready",
-    };
+
+  state.highlightedRecordingIds = changedIds;
+  if (changedIds.size) {
+    clearRecordingHighlightsLater();
   }
-  if (Number(recording.clean_segment_count || 0) <= 0) {
-    return {
-      text: "No clean content",
-      tone: "watchable-failed",
-    };
-  }
-  const exportState = String(recording.clean_export_state || "none").toLowerCase();
-  const compactState = String(recording.clean_compact_state || "none").toLowerCase();
-  if (exportState === "failed" || compactState === "failed") {
-    return {
-      text: "MP4 export failed",
-      tone: "watchable-failed",
-    };
-  }
-  if (
-    exportState === "queued" ||
-    exportState === "processing" ||
-    compactState === "queued" ||
-    compactState === "processing"
-  ) {
-    return {
-      text: "Preparing MP4 automatically",
-      tone: "watchable-pending",
-    };
-  }
-  if (compactState === "ready" || exportState === "ready") {
-    return {
-      text: "MP4 ready",
-      tone: "watchable-ready",
-    };
-  }
-  return {
-    text: "Preparing MP4 automatically",
-    tone: "watchable-pending",
-  };
 }
 
 function createAvatar(name, profileImageUrl) {
@@ -282,131 +384,320 @@ function createAvatar(name, profileImageUrl) {
 
   const fallback = document.createElement("div");
   fallback.className = "channel-avatar channel-avatar-fallback";
-  fallback.setAttribute("aria-hidden", "true");
   fallback.textContent = (name || "?").slice(0, 1).toUpperCase();
+  fallback.setAttribute("aria-hidden", "true");
   return fallback;
 }
 
-function createStatusDetailRow(labelText, valueText) {
-  const row = document.createElement("div");
-  row.className = "status-detail-row";
-  const label = document.createElement("strong");
-  label.className = "status-detail-label";
-  label.textContent = `${labelText}:`;
-  const value = document.createElement("span");
-  value.className = "status-detail-value";
-  value.textContent = valueText;
-  row.append(label, value);
-  return row;
+function createStatusBadge(tone, text) {
+  const badge = document.createElement("span");
+  badge.className = `status-badge status-${tone}`;
+  badge.textContent = text;
+  return badge;
 }
 
-function createTruncatableTitleRow(valueText) {
-  const row = createStatusDetailRow("Title", valueText);
-  const valueNode = row.querySelector(".status-detail-value");
-  if (valueNode !== null) {
-    valueNode.dataset.truncateToCardWidth = "true";
-    valueNode.dataset.originalText = valueText;
-    valueNode.title = valueText;
-  }
-  return row;
+function createStatBlock(label, value) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "focus-stat";
+
+  const labelNode = document.createElement("span");
+  labelNode.className = "focus-stat-label";
+  labelNode.textContent = label;
+
+  const valueNode = document.createElement("span");
+  valueNode.className = "focus-stat-value";
+  valueNode.textContent = value;
+
+  wrapper.append(labelNode, valueNode);
+  return wrapper;
 }
 
-function measureTextWidth(text, font) {
-  if (textMeasureCanvas === null) {
-    textMeasureCanvas = document.createElement("canvas");
-  }
-  const context = textMeasureCanvas.getContext("2d");
-  if (context === null) {
-    return text.length;
-  }
-  context.font = font;
-  return context.measureText(text).width;
+function renderSummaryCards() {
+  const activeCount = state.statuses.filter((status) => status.is_live || status.is_recording).length;
+  const recordingCount = state.statuses.filter((status) => status.is_recording).length;
+  const liveCount = state.statuses.filter((status) => status.is_live).length;
+  const monitoredCount = state.streamers.length;
+  const recentRecordings = state.recordings.filter((recording) => isRecent(recording.modified_at, 24));
+  const adBreakCount = recentRecordings.reduce((total, recording) => total + Number(recording.ad_break_count || 0), 0);
+  const readyExports = recentRecordings.filter((recording) => (
+    String(recording.clean_export_state || "none").toLowerCase() === "ready"
+    || String(recording.clean_compact_state || "none").toLowerCase() === "ready"
+  )).length;
+  const pendingExports = recentRecordings.filter((recording) => (
+    ["queued", "processing"].includes(String(recording.clean_export_state || "none").toLowerCase())
+    || ["queued", "processing"].includes(String(recording.clean_compact_state || "none").toLowerCase())
+  )).length;
+
+  elements.summaryActive.textContent = String(activeCount);
+  elements.summaryActiveMeta.textContent = `${liveCount} live • ${monitoredCount} monitored`;
+
+  elements.summaryRecording.textContent = String(recordingCount);
+  elements.summaryRecordingMeta.textContent = recordingCount
+    ? `${recordingCount} capture session${recordingCount === 1 ? "" : "s"} active`
+    : "No active recordings";
+
+  elements.summaryAdBreaks.textContent = String(adBreakCount);
+  elements.summaryAdBreaksMeta.textContent = recentRecordings.length
+    ? `${recentRecordings.length} session${recentRecordings.length === 1 ? "" : "s"} updated in 24h`
+    : "No recent sessions";
+
+  elements.summaryExports.textContent = String(readyExports);
+  elements.summaryExportsMeta.textContent = pendingExports
+    ? `${pendingExports} export${pendingExports === 1 ? "" : "s"} still processing`
+    : "Ready in the last 24 hours";
+
+  elements.streamerCount.textContent = `${monitoredCount} monitored`;
+  elements.streamersLabel.textContent = monitoredCount
+    ? `${liveCount} live • ${recordingCount} recording`
+    : "Manage recording policy";
 }
 
-function truncateToWidth(text, maxWidth, font, suffix = "...") {
-  if (!text) {
-    return text;
+async function createCleanExport(recording, mode = "retry") {
+  try {
+    const query = new URLSearchParams({ mode }).toString();
+    await request(`/recordings/${encodeURIComponent(recording.recording_id)}/exports/clean-mp4?${query}`, {
+      method: "POST",
+    });
+    showToast(`${mode === "force" ? "Forced" : "Queued"} MP4 export for ${recording.channel}`);
+    await refreshRecordings();
+  } catch (error) {
+    showToast(error.message);
   }
-  if (maxWidth <= 0) {
-    return suffix;
-  }
-  if (measureTextWidth(text, font) <= maxWidth) {
-    return text;
+}
+
+function createRecordingActions(recording) {
+  const actions = document.createElement("div");
+  actions.className = "recording-actions";
+
+  const recordingStatus = getRecordingStatus(recording);
+  if (recordingStatus.tone === "ready" && recording.clean_export_state === "ready") {
+    const mp4Download = document.createElement("a");
+    mp4Download.className = "action-link small";
+    mp4Download.href = `${apiBaseUrl}/recordings/${encodeURIComponent(recording.recording_id)}/download/clean-mp4`;
+    mp4Download.textContent = "MP4";
+    actions.append(mp4Download);
+  } else if (shouldAllowMp4Export(recording)) {
+    const exportButton = document.createElement("button");
+    exportButton.className = "secondary small";
+    exportButton.type = "button";
+    exportButton.textContent = recordingStatus.tone === "failed" ? "Retry MP4" : "Prepare MP4";
+    exportButton.addEventListener("click", async () => {
+      exportButton.disabled = true;
+      exportButton.textContent = "Queueing...";
+      await createCleanExport(recording, recordingStatus.tone === "failed" ? "force" : "retry");
+      exportButton.disabled = false;
+      exportButton.textContent = recordingStatus.tone === "failed" ? "Retry MP4" : "Prepare MP4";
+    });
+    actions.append(exportButton);
   }
 
-  const suffixWidth = measureTextWidth(suffix, font);
-  if (suffixWidth >= maxWidth) {
-    return suffix;
+  return actions;
+}
+
+function createRecordingErrorDetails(recording) {
+  const errorText = getRecordingError(recording);
+  if (!errorText) {
+    return null;
   }
 
-  const graphemes = Array.from(text);
-  let low = 0;
-  let high = graphemes.length;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    const candidate = `${graphemes.slice(0, middle).join("")}${suffix}`;
-    if (measureTextWidth(candidate, font) <= maxWidth) {
-      low = middle;
+  const details = document.createElement("details");
+  details.className = "details-toggle";
+
+  const summary = document.createElement("summary");
+  summary.textContent = "Show error details";
+
+  const content = document.createElement("p");
+  content.textContent = errorText;
+
+  details.append(summary, content);
+  return details;
+}
+
+function createFocusCard(status) {
+  const activeRecording = getActiveRecordingForChannel(status.name);
+  const recordingStartValue = status.is_recording ? formatDate(status.recording_started_at) : "Not recording";
+  const artifactModeValue = activeRecording ? formatState(activeRecording.artifact_mode) : (status.is_recording ? "Unknown" : "Idle");
+  const outputValue = status.is_recording
+    ? (activeRecording?.clean_export_dir_path || status.output_path || "N/A")
+    : "Not recording";
+  const card = document.createElement("article");
+  card.className = "focus-card";
+  if (status.is_recording) {
+    card.classList.add("is-recording");
+  }
+  if (hasStatusError(status)) {
+    card.classList.add("is-failed");
+  }
+
+  const top = document.createElement("div");
+  top.className = "focus-top";
+
+  const identity = document.createElement("div");
+  identity.className = "focus-identity";
+  identity.append(createAvatar(status.name, status.profile_image_url));
+
+  const nameWrap = document.createElement("div");
+  nameWrap.className = "focus-name-wrap";
+
+  const nameLine = document.createElement("div");
+  nameLine.className = "focus-name-line";
+
+  const name = document.createElement("strong");
+  name.className = "focus-name";
+  name.textContent = status.name;
+  nameLine.append(name);
+
+  const subtitle = document.createElement("p");
+  subtitle.className = "focus-subtitle";
+  subtitle.textContent = status.game_name || "No category";
+
+  const title = document.createElement("p");
+  title.className = "focus-title";
+  title.textContent = status.title || "No live title available";
+
+  const badges = document.createElement("div");
+  badges.className = "focus-badges";
+  badges.append(createStatusBadge(status.is_live ? "live" : "offline", status.is_live ? "LIVE" : "OFFLINE"));
+
+  if (status.is_recording) {
+    badges.append(createStatusBadge("recording", "RECORDING"));
+  }
+  if (status.stop_after_at && !status.is_live && status.is_recording) {
+    badges.append(createStatusBadge("warning", "STOPPING"));
+  }
+  if (hasStatusError(status)) {
+    badges.append(createStatusBadge("failed", "ERROR"));
+  }
+
+  nameWrap.append(nameLine, title, subtitle);
+  if (status.is_recording) {
+    const pulse = document.createElement("div");
+    pulse.className = "recording-pulse";
+    const dot = document.createElement("span");
+    dot.className = "recording-dot";
+    pulse.append(dot, document.createTextNode("Recording in progress"));
+    nameWrap.append(pulse);
+  }
+
+  identity.append(nameWrap);
+  top.append(identity, badges);
+
+  const stats = document.createElement("div");
+  stats.className = "focus-stats";
+  stats.append(
+    createStatBlock("Viewers", String(status.viewer_count ?? "N/A")),
+    createStatBlock("Recording State", formatState(normalizeRecordingState(status.recording_state))),
+    createStatBlock("Recording Started", recordingStartValue),
+    createStatBlock("Artifact Mode", artifactModeValue),
+    createStatBlock("Checked", formatDate(status.last_checked_at)),
+    createStatBlock("Output", outputValue),
+  );
+
+  const actions = document.createElement("div");
+  actions.className = "focus-actions";
+
+  if (status.is_recording) {
+    const stopButton = document.createElement("button");
+    stopButton.className = "danger";
+    stopButton.type = "button";
+    stopButton.textContent = "Stop Recording";
+    stopButton.addEventListener("click", async () => {
+      stopButton.disabled = true;
+      stopButton.textContent = "Stopping...";
+      try {
+        const result = await request(`/streamers/${encodeURIComponent(status.name)}/stop`, {
+          method: "POST",
+        });
+        showToast(result.stopped ? `Stopped recording for ${status.name}` : `No active recording for ${status.name}`);
+        await refreshAllData();
+      } catch (error) {
+        stopButton.disabled = false;
+        stopButton.textContent = "Stop Recording";
+        showToast(error.message);
+      }
+    });
+    actions.append(stopButton);
+  } else if (status.is_live) {
+    if (status.enabled_for_recording === false) {
+      actions.append(createStatusBadge("warning", "Recording Disabled"));
     } else {
-      high = middle - 1;
+      const startButton = document.createElement("button");
+      startButton.type = "button";
+      startButton.textContent = "Start Recording";
+      startButton.addEventListener("click", async () => {
+        startButton.disabled = true;
+        startButton.textContent = "Starting...";
+        try {
+          const result = await request(`/streamers/${encodeURIComponent(status.name)}/start`, {
+            method: "POST",
+          });
+          showToast(result.started ? `Started recording for ${status.name}` : `Could not start recording for ${status.name}`);
+          await refreshAllData();
+        } catch (error) {
+          startButton.disabled = false;
+          startButton.textContent = "Start Recording";
+          showToast(error.message);
+        }
+      });
+      actions.append(startButton);
     }
   }
 
-  return `${graphemes.slice(0, low).join("")}${suffix}`;
-}
+  card.append(top, stats, actions);
 
-function applyStatusTitleTruncation(scope = document) {
-  const titleNodes = scope.querySelectorAll(".status-detail-value[data-truncate-to-card-width=\"true\"]");
-  for (const valueNode of titleNodes) {
-    const fullTitle = valueNode.dataset.originalText || valueNode.textContent || "";
-    const row = valueNode.closest(".status-detail-row");
-    if (row === null) {
-      continue;
-    }
-
-    const label = row.querySelector(".status-detail-label");
-    const labelWidth = label ? label.getBoundingClientRect().width : 0;
-    const rowStyle = window.getComputedStyle(row);
-    const gapRaw = rowStyle.columnGap || rowStyle.gap || "0";
-    const gap = Number.parseFloat(gapRaw);
-    const normalizedGap = Number.isFinite(gap) ? gap : 0;
-    const availableWidth = Math.max(0, row.clientWidth - labelWidth - normalizedGap);
-
-    const valueStyle = window.getComputedStyle(valueNode);
-    const font = valueStyle.font
-      || `${valueStyle.fontStyle} ${valueStyle.fontWeight} ${valueStyle.fontSize} ${valueStyle.fontFamily}`;
-
-    valueNode.textContent = truncateToWidth(fullTitle, availableWidth, font);
+  if (status.last_error) {
+    const errorDetails = document.createElement("details");
+    errorDetails.className = "details-toggle";
+    const summary = document.createElement("summary");
+    summary.textContent = "Show last error";
+    const text = document.createElement("p");
+    text.textContent = status.last_error;
+    errorDetails.append(summary, text);
+    card.append(errorDetails);
   }
+
+  return card;
 }
 
-function shiftStatusCarousel(statuses, step) {
+function renderStatuses() {
+  const statuses = getLiveFocusStatuses(state.statuses);
+  elements.focusGrid.replaceChildren();
+  elements.focusEmpty.hidden = statuses.length > 0;
+
+  for (const button of elements.statusFilters.querySelectorAll("[data-filter]")) {
+    button.classList.toggle("is-active", button.dataset.filter === state.statusFilter);
+  }
+
   if (!statuses.length) {
-    state.statusCarouselIndex = 0;
     return;
   }
-  const nextIndex = state.statusCarouselIndex + step;
-  state.statusCarouselIndex = (nextIndex + statuses.length) % statuses.length;
-  renderStatuses(statuses);
+
+  for (const status of statuses) {
+    elements.focusGrid.append(createFocusCard(status));
+  }
+}
+
+function getStreamerStatus(streamerName) {
+  return state.statuses.find((status) => status.name === streamerName) || null;
 }
 
 function getStreamerDirectorySelections(name) {
   return state.streamerDirectorySelectionsByName[name] || [];
 }
 
-function setStreamerDirectorySelection(name, recordingId, isSelected) {
-  const currentSelections = new Set(getStreamerDirectorySelections(name));
-  if (isSelected) {
-    currentSelections.add(recordingId);
+function setStreamerDirectorySelection(name, recordingId, selected) {
+  const current = new Set(getStreamerDirectorySelections(name));
+  if (selected) {
+    current.add(recordingId);
   } else {
-    currentSelections.delete(recordingId);
+    current.delete(recordingId);
   }
-  state.streamerDirectorySelectionsByName[name] = Array.from(currentSelections);
+  state.streamerDirectorySelectionsByName[name] = Array.from(current);
 }
 
 async function loadStreamerRecordingDirectories(name) {
   state.streamerDirectoryLoadingName = name;
-  renderStreamers(state.streamers);
+  renderStreamers();
   try {
     const directories = await request(`/streamers/${encodeURIComponent(name)}/recording-directories`);
     state.streamerDirectoryEntriesByName[name] = directories;
@@ -419,20 +710,20 @@ async function toggleStreamerDirectoryPanel(name) {
   if (state.expandedStreamerName === name) {
     state.expandedStreamerName = null;
     delete state.streamerDirectorySelectionsByName[name];
-    renderStreamers(state.streamers);
+    renderStreamers();
     return;
   }
 
   state.expandedStreamerName = name;
   delete state.streamerDirectorySelectionsByName[name];
-  renderStreamers(state.streamers);
+  renderStreamers();
 
   try {
     await loadStreamerRecordingDirectories(name);
-    renderStreamers(state.streamers);
+    renderStreamers();
   } catch (error) {
     state.expandedStreamerName = null;
-    renderStreamers(state.streamers);
+    renderStreamers();
     showToast(error.message);
   }
 }
@@ -442,6 +733,7 @@ async function deleteStreamerRecordingDirectories(name) {
   if (!selectedIds.length) {
     return;
   }
+
   const confirmed = window.confirm(
     `Delete ${selectedIds.length} recording director${selectedIds.length === 1 ? "y" : "ies"} for ${name}?`,
   );
@@ -450,7 +742,7 @@ async function deleteStreamerRecordingDirectories(name) {
   }
 
   state.streamerDirectoryDeletingName = name;
-  renderStreamers(state.streamers);
+  renderStreamers();
   try {
     const result = await request(`/streamers/${encodeURIComponent(name)}/recording-directories/delete`, {
       method: "POST",
@@ -462,13 +754,13 @@ async function deleteStreamerRecordingDirectories(name) {
     await Promise.all([refreshStreamers(), refreshRecordings()]);
     if (state.expandedStreamerName === name) {
       await loadStreamerRecordingDirectories(name);
-      renderStreamers(state.streamers);
+      renderStreamers();
     }
   } catch (error) {
     showToast(error.message);
   } finally {
     state.streamerDirectoryDeletingName = null;
-    renderStreamers(state.streamers);
+    renderStreamers();
   }
 }
 
@@ -480,59 +772,73 @@ async function setStreamerRecordingEnabled(name, enabledForRecording) {
   state.streamers = state.streamers.map((streamer) => (
     streamer.name === updated.name ? updated : streamer
   ));
-  renderStreamers(state.streamers);
+  renderStreamers();
+  renderSummaryCards();
   await Promise.all([refreshStatuses(), refreshRecordings()]);
   showToast(`${updated.name} recording ${updated.enabled_for_recording ? "enabled" : "disabled"}`);
 }
 
-function renderStreamers(streamers) {
-  elements.streamerCount.textContent = String(streamers.length);
+function renderStreamers() {
   elements.streamersList.replaceChildren();
-  elements.streamersEmpty.hidden = streamers.length > 0;
+  elements.streamersEmpty.hidden = state.streamers.length > 0;
 
-  if (state.expandedStreamerName && !streamers.some((streamer) => streamer.name === state.expandedStreamerName)) {
+  if (state.expandedStreamerName && !state.streamers.some((streamer) => streamer.name === state.expandedStreamerName)) {
     state.expandedStreamerName = null;
   }
 
-  for (const streamer of streamers) {
+  for (const streamer of state.streamers) {
+    const status = getStreamerStatus(streamer.name);
     const item = document.createElement("li");
-    item.className = "list-item";
+    item.className = "streamer-item";
 
-    const content = document.createElement("div");
-    content.className = "streamer-item-content";
+    const main = document.createElement("div");
+    main.className = "streamer-item-main";
 
-    const topRow = document.createElement("div");
-    topRow.className = "streamer-item-top";
+    const top = document.createElement("div");
+    top.className = "streamer-item-top";
 
-    const labelButton = document.createElement("button");
-    labelButton.className = "streamer-name-button";
-    labelButton.type = "button";
-    labelButton.textContent = streamer.name;
-    labelButton.setAttribute("aria-expanded", String(state.expandedStreamerName === streamer.name));
-    labelButton.addEventListener("click", async () => {
-      try {
-        await toggleStreamerDirectoryPanel(streamer.name);
-      } catch (error) {
-        showToast(error.message);
-      }
+    const left = document.createElement("div");
+
+    const nameButton = document.createElement("button");
+    nameButton.className = "streamer-name-button";
+    nameButton.type = "button";
+    nameButton.textContent = streamer.name;
+    nameButton.setAttribute("aria-expanded", String(state.expandedStreamerName === streamer.name));
+    nameButton.addEventListener("click", async () => {
+      await toggleStreamerDirectoryPanel(streamer.name);
     });
+
+    const badgeRow = document.createElement("div");
+    badgeRow.className = "status-stack";
+    badgeRow.append(createStatusBadge(
+      status?.is_live ? "live" : "offline",
+      status?.is_live ? "LIVE" : "OFFLINE",
+    ));
+    if (status?.is_recording) {
+      badgeRow.append(createStatusBadge("recording", "RECORDING"));
+    }
+    if (hasStatusError(status || {})) {
+      badgeRow.append(createStatusBadge("failed", "ERROR"));
+    }
+
+    left.append(nameButton, badgeRow);
 
     const controls = document.createElement("div");
     controls.className = "streamer-item-controls";
 
-    const toggleLabel = document.createElement("label");
-    toggleLabel.className = "streamer-recording-toggle";
+    const toggle = document.createElement("label");
+    toggle.className = "toggle";
 
     const toggleInput = document.createElement("input");
     toggleInput.type = "checkbox";
     toggleInput.checked = streamer.enabled_for_recording !== false;
     toggleInput.addEventListener("change", async () => {
-      const intendedValue = toggleInput.checked;
+      const nextValue = toggleInput.checked;
       toggleInput.disabled = true;
       try {
-        await setStreamerRecordingEnabled(streamer.name, intendedValue);
+        await setStreamerRecordingEnabled(streamer.name, nextValue);
       } catch (error) {
-        toggleInput.checked = !intendedValue;
+        toggleInput.checked = !nextValue;
         showToast(error.message);
       } finally {
         toggleInput.disabled = false;
@@ -541,10 +847,11 @@ function renderStreamers(streamers) {
 
     const toggleText = document.createElement("span");
     toggleText.textContent = "Auto Record";
-    toggleLabel.append(toggleInput, toggleText);
+    toggle.append(toggleInput, toggleText);
 
     const removeButton = document.createElement("button");
-    removeButton.className = "secondary";
+    removeButton.className = "ghost";
+    removeButton.type = "button";
     removeButton.textContent = "Remove";
     removeButton.addEventListener("click", async () => {
       try {
@@ -556,31 +863,34 @@ function renderStreamers(streamers) {
       }
     });
 
-    controls.append(toggleLabel, removeButton);
-    topRow.append(labelButton, controls);
-    content.append(topRow);
+    controls.append(toggle, removeButton);
+    top.append(left, controls);
+    main.append(top);
 
     if (state.expandedStreamerName === streamer.name) {
-      const directoriesPanel = document.createElement("div");
-      directoriesPanel.className = "streamer-directories";
+      const directories = document.createElement("div");
+      directories.className = "streamer-directories";
+
+      const shell = document.createElement("div");
+      shell.className = "directory-shell";
 
       if (state.streamerDirectoryLoadingName === streamer.name) {
-        const loadingState = document.createElement("div");
-        loadingState.className = "recording-meta";
-        loadingState.textContent = "Loading recording directories...";
-        directoriesPanel.append(loadingState);
+        const loading = document.createElement("div");
+        loading.className = "recording-muted";
+        loading.textContent = "Loading recording directories...";
+        shell.append(loading);
       } else {
-        const directories = state.streamerDirectoryEntriesByName[streamer.name] || [];
-        if (!directories.length) {
-          const emptyState = document.createElement("div");
-          emptyState.className = "streamer-directories-empty";
-          emptyState.textContent = "No deletable recordings for this streamer.";
-          directoriesPanel.append(emptyState);
+        const directoryItems = state.streamerDirectoryEntriesByName[streamer.name] || [];
+        if (!directoryItems.length) {
+          const empty = document.createElement("div");
+          empty.className = "recording-muted";
+          empty.textContent = "No deletable recordings for this streamer.";
+          shell.append(empty);
         } else {
-          const selectionList = document.createElement("div");
-          selectionList.className = "streamer-directory-list";
+          const list = document.createElement("div");
+          list.className = "streamer-directory-list";
 
-          for (const directory of directories) {
+          for (const directory of directoryItems) {
             const entry = document.createElement("label");
             entry.className = "streamer-directory-item";
 
@@ -589,33 +899,27 @@ function renderStreamers(streamers) {
             checkbox.checked = getStreamerDirectorySelections(streamer.name).includes(directory.recording_id);
             checkbox.addEventListener("change", () => {
               setStreamerDirectorySelection(streamer.name, directory.recording_id, checkbox.checked);
-              renderStreamers(state.streamers);
+              renderStreamers();
             });
 
-            const entryText = document.createElement("div");
-            entryText.className = "streamer-directory-copy";
+            const copy = document.createElement("div");
+            const directoryName = document.createElement("div");
+            directoryName.className = "directory-name";
+            directoryName.textContent = directory.directory_name;
 
-            const entryName = document.createElement("div");
-            entryName.className = "channel";
-            entryName.textContent = directory.directory_name;
+            const directoryMeta = document.createElement("div");
+            directoryMeta.className = "directory-meta";
+            directoryMeta.textContent = `Ended ${formatDate(directory.ended_at || directory.modified_at)}`;
 
-            const entryMeta = document.createElement("div");
-            entryMeta.className = "recording-meta";
-            entryMeta.textContent = `Ended ${formatDate(directory.ended_at || directory.modified_at)}`;
-
-            entryText.append(entryName, entryMeta);
-            entry.append(checkbox, entryText);
-            selectionList.append(entry);
+            copy.append(directoryName, directoryMeta);
+            entry.append(checkbox, copy);
+            list.append(entry);
           }
 
           const deleteButton = document.createElement("button");
-          deleteButton.className = "danger streamer-directory-delete";
+          deleteButton.className = "danger";
           deleteButton.type = "button";
-          deleteButton.textContent = (
-            state.streamerDirectoryDeletingName === streamer.name
-              ? "Deleting..."
-              : "Delete Selected"
-          );
+          deleteButton.textContent = state.streamerDirectoryDeletingName === streamer.name ? "Deleting..." : "Delete Selected";
           deleteButton.disabled = (
             state.streamerDirectoryDeletingName === streamer.name
             || getStreamerDirectorySelections(streamer.name).length === 0
@@ -624,313 +928,265 @@ function renderStreamers(streamers) {
             await deleteStreamerRecordingDirectories(streamer.name);
           });
 
-          directoriesPanel.append(selectionList, deleteButton);
+          shell.append(list, deleteButton);
         }
       }
-      content.append(directoriesPanel);
+
+      directories.append(shell);
+      main.append(directories);
     }
 
-    item.append(content);
+    item.append(main);
     elements.streamersList.append(item);
   }
 }
 
-function renderStatuses(statuses) {
-  elements.statusCards.replaceChildren();
-  elements.statusEmpty.hidden = statuses.length > 0;
-  elements.summaryRecording.textContent = String(statuses.filter((status) => status.is_recording).length);
-  elements.summaryLive.textContent = String(statuses.filter((status) => status.is_live).length);
+function filterAndSortRecordings(recordings) {
+  let result = [...recordings];
 
-  if (!statuses.length) {
-    state.statusCarouselIndex = 0;
-    state.statusFocusName = null;
+  switch (state.recordingFilter) {
+    case "recent_24h":
+      result = result.filter((recording) => isRecent(recording.modified_at, 24));
+      break;
+    case "processing":
+      result = result.filter((recording) => getRecordingStatus(recording).tone === "processing" || recording.is_recording);
+      break;
+    case "failed":
+      result = result.filter((recording) => getRecordingStatus(recording).tone === "failed");
+      break;
+    case "ready":
+      result = result.filter((recording) => getRecordingStatus(recording).tone === "ready");
+      break;
+    case "all":
+    default:
+      break;
+  }
+
+  result.sort((left, right) => {
+    if (state.recordingSort === "channel_asc") {
+      return String(left.channel || "").localeCompare(String(right.channel || ""));
+    }
+    if (state.recordingSort === "ad_break_desc") {
+      return Number(right.ad_break_count || 0) - Number(left.ad_break_count || 0);
+    }
+    if (state.recordingSort === "size_desc") {
+      return Number(right.size_bytes || 0) - Number(left.size_bytes || 0);
+    }
+    return parseDate(right.modified_at) - parseDate(left.modified_at);
+  });
+
+  return result;
+}
+
+function createRecordingTableRow(recording) {
+  const status = getRecordingStatus(recording);
+  const row = document.createElement("tr");
+  row.className = "recording-row";
+  if (state.highlightedRecordingIds.has(recording.recording_id)) {
+    row.classList.add("is-updated");
+  }
+
+  const channelCell = document.createElement("td");
+  const channelStack = document.createElement("div");
+  channelStack.className = "channel-stack";
+
+  const channelName = document.createElement("div");
+  channelName.className = "channel-name";
+  channelName.textContent = recording.channel || "N/A";
+
+  const recordingId = document.createElement("div");
+  recordingId.className = "subtle-line monospace";
+  recordingId.textContent = recording.recording_id;
+
+  const artifact = document.createElement("div");
+  artifact.className = "subtle-line";
+  artifact.textContent = `${formatState(recording.artifact_mode)} • ${toFileName(recording.file_path)}`;
+
+  channelStack.append(channelName, recordingId, artifact);
+  channelCell.append(channelStack);
+
+  const timeCell = document.createElement("td");
+  const timeWrap = document.createElement("div");
+  timeWrap.className = "recording-time";
+  const modified = document.createElement("div");
+  modified.textContent = formatDate(recording.modified_at);
+  const modifiedMeta = document.createElement("div");
+  modifiedMeta.className = "recording-muted";
+  modifiedMeta.textContent = `Updated ${formatRelativeTime(recording.modified_at)}`;
+  timeWrap.append(modified, modifiedMeta);
+  timeCell.append(timeWrap);
+
+  const adCountCell = document.createElement("td");
+  adCountCell.textContent = String(recording.ad_break_count ?? 0);
+
+  const statusCell = document.createElement("td");
+  statusCell.append(createStatusBadge(status.tone, status.label));
+
+  const statusMeta = document.createElement("div");
+  statusMeta.className = "recording-muted";
+  statusMeta.textContent = status.summary;
+  statusCell.append(statusMeta);
+
+  if (recording.clean_export_state && recording.clean_export_state !== "none") {
+    const exportMeta = document.createElement("div");
+    exportMeta.className = "recording-muted";
+    exportMeta.textContent = `Export: ${formatState(recording.clean_export_state)}`;
+    statusCell.append(exportMeta);
+  }
+
+  const errorDetails = createRecordingErrorDetails(recording);
+  if (errorDetails) {
+    statusCell.append(errorDetails);
+  }
+
+  const directoryCell = document.createElement("td");
+  const directoryWrap = document.createElement("div");
+  directoryWrap.className = "recording-path-wrap";
+
+  const directoryText = document.createElement("div");
+  directoryText.className = "path-text";
+  directoryText.textContent = recording.clean_export_dir_path || "Pending";
+
+  const pathMeta = document.createElement("div");
+  pathMeta.className = "recording-muted";
+  pathMeta.textContent = recording.clean_export_dir_path ? "MP4 export directory" : "Directory not ready yet";
+
+  directoryWrap.append(directoryText, pathMeta);
+  directoryCell.append(directoryWrap);
+
+  const sizeCell = document.createElement("td");
+  const sizeWrap = document.createElement("div");
+  sizeWrap.className = "recording-size";
+  const sizeText = document.createElement("div");
+  sizeText.textContent = formatBytes(recording.size_bytes);
+  const sizeMeta = document.createElement("div");
+  sizeMeta.className = "recording-muted";
+  sizeMeta.textContent = recording.is_recording ? "Growing" : "Final size";
+  sizeWrap.append(sizeText, sizeMeta);
+  sizeCell.append(sizeWrap);
+
+  const actionsCell = document.createElement("td");
+  actionsCell.append(createRecordingActions(recording));
+
+  row.append(channelCell, timeCell, adCountCell, statusCell, directoryCell, sizeCell, actionsCell);
+  return row;
+}
+
+function createRecordingCard(recording) {
+  const status = getRecordingStatus(recording);
+  const card = document.createElement("article");
+  card.className = "recording-card";
+  if (state.highlightedRecordingIds.has(recording.recording_id)) {
+    card.classList.add("is-updated");
+  }
+
+  const head = document.createElement("div");
+  head.className = "recording-card-head";
+
+  const titleWrap = document.createElement("div");
+  const channelName = document.createElement("div");
+  channelName.className = "channel-name";
+  channelName.textContent = recording.channel || "N/A";
+  const recordingId = document.createElement("div");
+  recordingId.className = "subtle-line monospace";
+  recordingId.textContent = recording.recording_id;
+  titleWrap.append(channelName, recordingId);
+
+  head.append(titleWrap, createStatusBadge(status.tone, status.label));
+
+  const grid = document.createElement("div");
+  grid.className = "recording-card-grid";
+
+  const fields = [
+    ["Time", formatDate(recording.modified_at)],
+    ["Ad Count", String(recording.ad_break_count ?? 0)],
+    ["MP4 Directory", recording.clean_export_dir_path || "Pending"],
+    ["Size", formatBytes(recording.size_bytes)],
+    ["Artifact", formatState(recording.artifact_mode)],
+    ["Output", status.summary],
+  ];
+
+  for (const [label, value] of fields) {
+    const block = document.createElement("div");
+    block.className = "recording-card-stat";
+    const labelNode = document.createElement("div");
+    labelNode.className = "recording-card-label";
+    labelNode.textContent = label;
+    const valueNode = document.createElement("div");
+    valueNode.className = label === "MP4 Directory" ? "path-text" : "";
+    valueNode.textContent = value;
+    block.append(labelNode, valueNode);
+    grid.append(block);
+  }
+
+  card.append(head, grid, createRecordingActions(recording));
+
+  const errorDetails = createRecordingErrorDetails(recording);
+  if (errorDetails) {
+    card.append(errorDetails);
+  }
+
+  return card;
+}
+
+function renderRecordings() {
+  const recordings = filterAndSortRecordings(state.recordings);
+  elements.recordingsBody.replaceChildren();
+  elements.recordingsCards.replaceChildren();
+  elements.recordingsEmpty.hidden = recordings.length > 0;
+  elements.recordingsTable.hidden = recordings.length === 0;
+  elements.recordingsTable.parentElement.hidden = recordings.length === 0;
+
+  for (const button of elements.recordingFilters.querySelectorAll("[data-filter]")) {
+    button.classList.toggle("is-active", button.dataset.filter === state.recordingFilter);
+  }
+  elements.recordingSort.value = state.recordingSort;
+
+  if (!recordings.length) {
     return;
   }
 
-  if (state.statusFocusName) {
-    const focusedIndex = statuses.findIndex((status) => status.name === state.statusFocusName);
-    if (focusedIndex >= 0) {
-      state.statusCarouselIndex = focusedIndex;
-    }
-    state.statusFocusName = null;
-  }
-
-  state.statusCarouselIndex = Math.max(0, Math.min(state.statusCarouselIndex, statuses.length - 1));
-  const status = statuses[state.statusCarouselIndex];
-
-  const card = document.createElement("article");
-  card.className = "status-card";
-
-  const top = document.createElement("div");
-  top.className = "status-top";
-
-  const name = document.createElement("strong");
-  name.className = "channel";
-  name.textContent = status.name;
-
-  const badges = document.createElement("div");
-  badges.className = "status-badges";
-  const liveBadge = document.createElement("span");
-  liveBadge.className = `badge ${status.is_live ? "live" : "offline"}`;
-  liveBadge.textContent = status.is_live ? "LIVE" : "OFFLINE";
-
-  badges.append(liveBadge);
-  if (status.is_recording) {
-    const recordingBadge = document.createElement("span");
-    recordingBadge.className = "badge recording";
-    recordingBadge.textContent = "RECORDING";
-    badges.append(recordingBadge);
-  }
-
-  const heading = document.createElement("div");
-  heading.className = "status-heading";
-
-  const identity = document.createElement("div");
-  identity.className = "status-identity";
-  identity.append(createAvatar(status.name, status.profile_image_url), name);
-
-  if (status.is_recording) {
-    const liveMotion = document.createElement("div");
-    liveMotion.className = "recording-motion";
-    liveMotion.setAttribute("aria-hidden", "true");
-    const recordingDot = document.createElement("span");
-    recordingDot.className = "recording-dot";
-    liveMotion.append(recordingDot);
-    for (let index = 0; index < 3; index += 1) {
-      const recordingWave = document.createElement("span");
-      recordingWave.className = "recording-wave";
-      liveMotion.append(recordingWave);
-    }
-    identity.append(liveMotion);
-  }
-
-  heading.append(identity, badges);
-
-  const actions = document.createElement("div");
-  actions.className = "status-actions";
-  if (status.is_recording) {
-    const stopButton = document.createElement("button");
-    stopButton.className = "danger";
-    stopButton.textContent = "Stop Recording";
-    stopButton.addEventListener("click", async () => {
-      stopButton.disabled = true;
-      stopButton.textContent = "Stopping...";
-      try {
-        const result = await request(`/streamers/${encodeURIComponent(status.name)}/stop`, {
-          method: "POST",
-        });
-        if (result.stopped) {
-          showToast(`Stopped recording for ${status.name}`);
-        } else {
-          showToast(`No active recording for ${status.name}`);
-        }
-        await refreshAllData();
-      } catch (error) {
-        stopButton.disabled = false;
-        stopButton.textContent = "Stop Recording";
-        showToast(error.message);
-      }
-    });
-    actions.append(stopButton);
-  } else if (status.is_live) {
-    if (status.enabled_for_recording === false) {
-      const disabledHint = document.createElement("span");
-      disabledHint.className = "status-action-note";
-      disabledHint.textContent = "Recording disabled";
-      actions.append(disabledHint);
-    } else {
-      const startButton = document.createElement("button");
-      startButton.textContent = "Start Recording";
-      startButton.addEventListener("click", async () => {
-        startButton.disabled = true;
-        startButton.textContent = "Starting...";
-        try {
-          const result = await request(`/streamers/${encodeURIComponent(status.name)}/start`, {
-            method: "POST",
-          });
-          if (result.started) {
-            showToast(`Started recording for ${status.name}`);
-          } else {
-            showToast(`Could not start recording for ${status.name}`);
-          }
-          await refreshAllData();
-        } catch (error) {
-          startButton.disabled = false;
-          startButton.textContent = "Start Recording";
-          showToast(error.message);
-        }
-      });
-      actions.append(startButton);
-    }
-  }
-
-  top.append(heading, actions);
-
-  const details = document.createElement("div");
-  details.className = "status-details";
-  details.append(
-    createStatusDetailRow(
-      "Recording State",
-      formatState(normalizeRecordingState(status.recording_state)),
-    ),
-    createTruncatableTitleRow(status.title || "N/A"),
-    createStatusDetailRow("Game", status.game_name || "N/A"),
-    createStatusDetailRow("Viewers", String(status.viewer_count ?? "N/A")),
-    createStatusDetailRow("Live Started", formatDate(status.started_at)),
-    createStatusDetailRow("Checked", formatDate(status.last_checked_at)),
-    createStatusDetailRow("Offline Since", formatDate(status.offline_since)),
-    createStatusDetailRow("Stop After", formatDate(status.stop_after_at)),
-    createStatusDetailRow("Recording Started", formatDate(status.recording_started_at)),
-    createStatusDetailRow("Recording Ended", formatDate(status.recording_ended_at)),
-    createStatusDetailRow("Exit Code", String(status.recording_exit_code ?? "N/A")),
-    createStatusDetailRow("Output", status.output_path || "N/A"),
-    createStatusDetailRow("Error", status.last_error || "None"),
-  );
-
-  card.append(top, details);
-
-  if (statuses.length > 1) {
-    const carouselControls = document.createElement("div");
-    carouselControls.className = "status-carousel";
-
-    const previousButton = document.createElement("button");
-    previousButton.className = "secondary status-carousel-button";
-    previousButton.type = "button";
-    previousButton.textContent = "<";
-    previousButton.setAttribute("aria-label", "Show previous streamer");
-    previousButton.addEventListener("click", () => {
-      shiftStatusCarousel(statuses, -1);
-    });
-
-    const statusPosition = document.createElement("div");
-    statusPosition.className = "status-carousel-position";
-    statusPosition.textContent = `${state.statusCarouselIndex + 1} / ${statuses.length}`;
-
-    const nextButton = document.createElement("button");
-    nextButton.className = "secondary status-carousel-button";
-    nextButton.type = "button";
-    nextButton.textContent = ">";
-    nextButton.setAttribute("aria-label", "Show next streamer");
-    nextButton.addEventListener("click", () => {
-      shiftStatusCarousel(statuses, 1);
-    });
-
-    carouselControls.append(previousButton, statusPosition, nextButton);
-    card.append(carouselControls);
-  }
-
-  elements.statusCards.append(card);
-  applyStatusTitleTruncation(card);
-}
-
-function renderRecordings(recordings) {
-  const visibleRecordings = recordings.slice(0, 5);
-  elements.recordingsBody.replaceChildren();
-  elements.recordingsEmpty.hidden = visibleRecordings.length > 0;
-  elements.recordingsTable.hidden = visibleRecordings.length === 0;
-
-  for (const recording of visibleRecordings) {
-    const exportStatus = getCleanExportStatus(recording);
-    const isSegmentNative = recording.artifact_mode === "segment_native";
-    const isRecording = Boolean(recording.is_recording);
-    const cleanExportState = String(recording.clean_export_state || "none").toLowerCase();
-    const isPreparing = cleanExportState === "queued" || cleanExportState === "processing";
-    const isReady = cleanExportState === "ready";
-    const hasCleanContent = Number(recording.clean_segment_count || 0) > 0;
-    const row = document.createElement("tr");
-
-    const channelCell = document.createElement("td");
-    channelCell.className = "channel";
-    const channelName = document.createElement("div");
-    channelName.textContent = recording.channel || "N/A";
-    channelCell.append(channelName);
-
-    const fileMeta = document.createElement("div");
-    fileMeta.className = "recording-meta";
-    const sourceFileName = recording.source_file_name || recording.file_name || "N/A";
-    const displayFileName = isRecording
-      ? sourceFileName
-      : recording.watchable_available && recording.watchable_file_name
-      ? recording.watchable_file_name
-      : sourceFileName;
-    fileMeta.textContent = `${displayFileName} (${formatBytes(recording.size_bytes)})`;
-    channelCell.append(fileMeta);
-
-    if (isRecording) {
-      const activeHint = document.createElement("div");
-      activeHint.className = "recording-meta";
-      activeHint.textContent = "Recording in progress";
-      channelCell.append(activeHint);
-    }
-
-    const exportCell = document.createElement("td");
-    const exportLabel = document.createElement("span");
-    exportLabel.className = `watchable-status ${exportStatus.tone}`;
-    exportLabel.textContent = exportStatus.text;
-    exportCell.append(exportLabel);
-
-    if (recording.unknown_ad_confidence && isSegmentNative) {
-      const confidenceHint = document.createElement("div");
-      confidenceHint.className = "recording-meta";
-      confidenceHint.textContent = "No ads detected";
-      exportCell.append(confidenceHint);
-    }
-
-    if (recording.clean_export_error) {
-      const exportError = document.createElement("div");
-      exportError.className = "recording-meta";
-      exportError.textContent = recording.clean_export_error;
-      exportCell.append(exportError);
-    }
-
-    const exportDirectory = document.createElement("div");
-    exportDirectory.className = "recording-meta recording-path";
-    if (recording.clean_export_dir_path) {
-      const directoryLabel = isReady ? "MP4 Directory" : "Export Directory";
-      exportDirectory.textContent = `${directoryLabel}: ${recording.clean_export_dir_path}`;
-    } else if (isSegmentNative) {
-      exportDirectory.textContent = "Export Directory: pending";
-    } else {
-      exportDirectory.textContent = "Export Directory: N/A";
-    }
-    exportCell.append(exportDirectory);
-
-    const modifiedCell = document.createElement("td");
-    modifiedCell.textContent = formatDate(recording.modified_at);
-
-    row.append(channelCell, exportCell, modifiedCell);
-    elements.recordingsBody.append(row);
+  for (const recording of recordings) {
+    elements.recordingsBody.append(createRecordingTableRow(recording));
+    elements.recordingsCards.append(createRecordingCard(recording));
   }
 }
 
 async function refreshStreamers() {
-  const streamers = await request("/streamers");
-  state.streamers = streamers;
-  elements.summaryMonitored.textContent = String(streamers.length);
-  renderStreamers(streamers);
+  state.streamers = await request("/streamers");
+  renderStreamers();
+  renderSummaryCards();
 }
 
 async function refreshStatuses() {
-  const statuses = await request("/status");
-  renderStatuses(statuses);
+  state.statuses = await request("/status");
+  renderStatuses();
+  renderStreamers();
+  renderSummaryCards();
 }
 
 async function refreshRecordings() {
-  const recordings = await request("/recordings");
-  renderRecordings(recordings);
-  const needsFollowup = recordings.some((recording) => {
+  const nextRecordings = await request("/recordings");
+  markUpdatedRecordings(state.recordings, nextRecordings);
+  state.recordings = nextRecordings;
+  renderRecordings();
+  renderStatuses();
+  renderSummaryCards();
+
+  const needsFollowup = state.recordings.some((recording) => {
     if (recording.is_recording) {
       return true;
     }
     const exportState = String(recording.clean_export_state || "none").toLowerCase();
     const compactState = String(recording.clean_compact_state || "none").toLowerCase();
     return (
-      exportState === "queued" ||
-      exportState === "processing" ||
-      compactState === "queued" ||
-      compactState === "processing"
+      exportState === "queued"
+      || exportState === "processing"
+      || compactState === "queued"
+      || compactState === "processing"
     );
   });
+
   if (needsFollowup) {
     scheduleRecordingsFollowupRefresh();
   } else {
@@ -940,46 +1196,16 @@ async function refreshRecordings() {
 
 async function refreshAllData({ silent = false } = {}) {
   state.refreshInFlight = true;
-  setPollingLabel();
   try {
     await request("/refresh", { method: "POST" });
     await Promise.all([refreshStreamers(), refreshStatuses(), refreshRecordings()]);
-    state.pollingCountdownSeconds = Math.floor(pollIntervalMs / 1000);
   } finally {
     state.refreshInFlight = false;
-    setPollingLabel();
   }
   if (!silent) {
     showToast("Dashboard refreshed");
   }
 }
-
-elements.refreshAll.addEventListener("click", async () => {
-  try {
-    await refreshAllData();
-  } catch (error) {
-    showToast(error.message);
-  }
-});
-
-elements.refreshStatus.addEventListener("click", async () => {
-  try {
-    await request("/refresh", { method: "POST" });
-    await Promise.all([refreshStatuses(), refreshRecordings()]);
-    showToast("Status refreshed");
-  } catch (error) {
-    showToast(error.message);
-  }
-});
-
-elements.refreshRecordings.addEventListener("click", async () => {
-  try {
-    await refreshRecordings();
-    showToast("Recordings refreshed");
-  } catch (error) {
-    showToast(error.message);
-  }
-});
 
 elements.streamerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -987,42 +1213,45 @@ elements.streamerForm.addEventListener("submit", async (event) => {
   if (!name) {
     return;
   }
-  const normalizedName = name.toLowerCase();
 
   try {
     await request("/streamers", {
       method: "POST",
       body: JSON.stringify({ name }),
     });
-    state.statusFocusName = normalizedName;
     elements.streamerName.value = "";
     showToast(`Added ${name}`);
     await refreshAllData();
   } catch (error) {
-    state.statusFocusName = null;
     showToast(error.message);
   }
 });
 
-elements.togglePolling.addEventListener("click", () => {
-  state.pollingEnabled = !state.pollingEnabled;
-  localStorage.setItem(pollingEnabledKey, String(state.pollingEnabled));
-  state.pollingCountdownSeconds = Math.floor(pollIntervalMs / 1000);
-  setPollingLabel();
-  startPollingLoop();
+elements.statusFilters.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-filter]");
+  if (!button) {
+    return;
+  }
+  state.statusFilter = button.dataset.filter;
+  renderStatuses();
 });
 
-document.addEventListener("visibilitychange", () => {
-  state.pollingCountdownSeconds = Math.floor(pollIntervalMs / 1000);
-  setPollingLabel();
+elements.recordingFilters.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-filter]");
+  if (!button) {
+    return;
+  }
+  state.recordingFilter = button.dataset.filter;
+  renderRecordings();
 });
 
-window.addEventListener("resize", () => {
-  applyStatusTitleTruncation(elements.statusCards);
+elements.recordingSort.addEventListener("change", () => {
+  state.recordingSort = elements.recordingSort.value;
+  renderRecordings();
 });
 
 elements.recordingsTable.hidden = true;
-setPollingLabel();
+elements.recordingsTable.parentElement.hidden = true;
 startPollingLoop();
 
 refreshAllData().catch((error) => {

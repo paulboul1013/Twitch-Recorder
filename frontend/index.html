@@ -5,94 +5,185 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Twitch Recorder</title>
-  <link rel="stylesheet" href="./styles.css?v=20260321-1" />
+  <link rel="stylesheet" href="./styles.css?v=20260408-1" />
 </head>
 
 <body>
   <div class="page-shell">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">Monitor and Capture</p>
-        <h1>Twitch Recorder Control Panel</h1>
-        <p class="hero-copy">
-          Add channels, check live status, and review saved recordings from one small dashboard.
+    <header class="app-header panel">
+      <div class="header-copy">
+        <p class="eyebrow">Realtime Capture Console</p>
+        <h1>Twitch Recorder</h1>
+        <p class="header-description">
+          Monitor live channels, control active recordings, and track export progress from one dense dashboard.
         </p>
-        <div class="hero-summary">
-          <div class="summary-chip">
-            <span id="summaryRecording" class="summary-value">0</span>
-            <span class="summary-label">Recording</span>
-          </div>
-          <div class="summary-chip">
-            <span id="summaryLive" class="summary-value">0</span>
-            <span class="summary-label">Live</span>
-          </div>
-          <div class="summary-chip">
-            <span id="summaryMonitored" class="summary-value">0</span>
-            <span class="summary-label">Monitored</span>
-          </div>
+        <div class="header-meta">
+          <span class="meta-pill meta-pill-muted">Auto refresh enabled</span>
         </div>
-      </div>
-      <div class="hero-actions">
-        <div class="poller-bar">
-          <button id="togglePolling" class="secondary">Pause Auto Refresh</button>
-          <span id="pollingStatus" class="polling-status">Auto refresh in 15s</span>
-        </div>
-        <button id="refreshAll">Refresh Now</button>
       </div>
     </header>
 
-    <main class="grid">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Monitored Streamers</h2>
-          <span id="streamerCount" class="pill">0</span>
+    <section class="summary-grid" aria-label="Top summary">
+      <article class="summary-card panel">
+        <div class="summary-card-head">
+          <span class="summary-kicker">Active Streamers</span>
+          <span class="summary-icon">A</span>
         </div>
-        <form id="streamerForm" class="stacked-form" onsubmit="return false;">
-          <label>
-            <span>Channel Name</span>
-            <input id="streamerName" name="streamerName" type="text" placeholder="input twitch streamer name"
-              required />
-          </label>
-          <button type="submit">Add Streamer</button>
-        </form>
-        <div id="streamersEmpty" class="empty-state">No monitored channels yet.</div>
-        <ul id="streamersList" class="list"></ul>
+        <strong id="summaryActive" class="summary-value">0</strong>
+        <p id="summaryActiveMeta" class="summary-meta">No active streamers</p>
+      </article>
+
+      <article class="summary-card panel">
+        <div class="summary-card-head">
+          <span class="summary-kicker">Recording Now</span>
+          <span class="summary-icon">R</span>
+        </div>
+        <strong id="summaryRecording" class="summary-value">0</strong>
+        <p id="summaryRecordingMeta" class="summary-meta">Idle</p>
+      </article>
+
+      <article class="summary-card panel">
+        <div class="summary-card-head">
+          <span class="summary-kicker">Recent Ad Breaks</span>
+          <span class="summary-icon">B</span>
+        </div>
+        <strong id="summaryAdBreaks" class="summary-value">0</strong>
+        <p id="summaryAdBreaksMeta" class="summary-meta">Last 24 hours</p>
+      </article>
+
+      <article class="summary-card panel">
+        <div class="summary-card-head">
+          <span class="summary-kicker">Latest MP4 Exports</span>
+          <span class="summary-icon">M</span>
+        </div>
+        <strong id="summaryExports" class="summary-value">0</strong>
+        <p id="summaryExportsMeta" class="summary-meta">Ready in the last 24 hours</p>
+      </article>
+    </section>
+
+    <main class="main-grid">
+      <section class="panel panel-focus">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Live / Recording Focus</p>
+            <h2>Active channels</h2>
+          </div>
+          <div class="toolbar">
+            <div id="statusFilters" class="segmented-control" role="tablist" aria-label="Live filters">
+              <button class="segment is-active" type="button" data-filter="active">Active</button>
+              <button class="segment" type="button" data-filter="live">Live</button>
+              <button class="segment" type="button" data-filter="recording">Recording</button>
+              <button class="segment" type="button" data-filter="failed">Failed</button>
+              <button class="segment" type="button" data-filter="all">All</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="focusEmpty" class="empty-state" hidden>
+          <strong>No active channels right now.</strong>
+          <p>Streams that are live, recording, or failing will appear here first.</p>
+        </div>
+        <div id="focusGrid" class="focus-grid"></div>
       </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Live Status</h2>
-          <button id="refreshStatus" class="secondary">Reload</button>
+      <aside class="panel panel-system">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="section-kicker">System / Actions</p>
+            <h2>Control panel</h2>
+          </div>
         </div>
-        <div id="statusEmpty" class="empty-state">Status appears after the first refresh.</div>
-        <div id="statusCards" class="cards"></div>
-      </section>
 
-      <section class="panel panel-wide">
-        <div class="panel-head">
-          <h2>Recordings</h2>
-          <button id="refreshRecordings" class="secondary">Reload</button>
+        <section class="system-block">
+          <div class="system-block-head">
+            <h3>Quick actions</h3>
+            <span id="streamerCount" class="metric-pill">0 monitored</span>
+          </div>
+          <p class="muted-label">All statuses and recordings refresh automatically in the background.</p>
+        </section>
+
+        <section class="system-block">
+          <div class="system-block-head">
+            <h3>Add streamer</h3>
+          </div>
+          <form id="streamerForm" class="streamer-form" onsubmit="return false;">
+            <label for="streamerName">Channel name</label>
+            <div class="streamer-form-row">
+              <input id="streamerName" name="streamerName" type="text" placeholder="input twitch streamer name"
+                required />
+              <button type="submit">Add</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="system-block">
+          <div class="system-block-head">
+            <h3>Monitored streamers</h3>
+            <span id="streamersLabel" class="muted-label">Manage recording policy</span>
+          </div>
+          <div id="streamersEmpty" class="empty-state empty-state-compact">No monitored channels yet.</div>
+          <ul id="streamersList" class="streamer-list"></ul>
+        </section>
+      </aside>
+
+      <section class="panel panel-recordings">
+        <div class="section-head section-head-recordings">
+          <div>
+            <p class="section-kicker">Recent Recordings</p>
+            <h2>Output timeline</h2>
+          </div>
+          <div class="toolbar toolbar-recordings">
+            <div id="recordingFilters" class="segmented-control" role="tablist" aria-label="Recording filters">
+              <button class="segment is-active" type="button" data-filter="all">All</button>
+              <button class="segment" type="button" data-filter="recent_24h">24h</button>
+              <button class="segment" type="button" data-filter="processing">Processing</button>
+              <button class="segment" type="button" data-filter="failed">Failed</button>
+              <button class="segment" type="button" data-filter="ready">Ready</button>
+            </div>
+            <label class="sort-control" for="recordingSort">
+              <span>Sort</span>
+              <select id="recordingSort">
+                <option value="modified_desc">Latest updated</option>
+                <option value="channel_asc">Channel</option>
+                <option value="ad_break_desc">Ad breaks</option>
+                <option value="size_desc">Size</option>
+              </select>
+            </label>
+          </div>
         </div>
-        <div id="recordingsEmpty" class="empty-state">No recordings saved yet.</div>
-        <div class="table-wrap">
-          <table id="recordingsTable">
-            <thead>
-              <tr>
-                <th>Channel</th>
-                <th>Clean MP4</th>
-                <th>Modified</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+
+        <div id="recordingsEmpty" class="empty-state" hidden>
+          <strong>No recordings yet.</strong>
+          <p>Finished sessions and export progress will appear here.</p>
         </div>
+
+        <div class="recordings-desktop">
+          <div class="table-wrap">
+            <table id="recordingsTable">
+              <thead>
+                <tr>
+                  <th>Channel</th>
+                  <th>Time</th>
+                  <th>Ad Count</th>
+                  <th>Output Status</th>
+                  <th>MP4 Directory</th>
+                  <th>Size</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="recordingsCards" class="recordings-mobile"></div>
       </section>
     </main>
 
     <div id="toast" class="toast" hidden></div>
   </div>
 
-  <script src="./app.js?v=20260321-1" defer></script>
+  <script src="./app.js?v=20260408-1" defer></script>
 </body>
 
 </html>
