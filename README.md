@@ -130,13 +130,6 @@ docker compose up -d --build
 - clean MP4 是否已完成
 - clean MP4 所在的 `exports/` 目錄路徑
 
-## 廣告緩解（Hybrid 模式）
-
-- 未設定使用者 token：走一般模式錄影
-- 有設定 `TWITCH_USER_OAUTH_TOKEN`：系統會先嘗試登入態抓流（best-effort），失敗時自動回退
-- 錄影中會從 `streamlink` 的輸出訊息偵測 ad break；`timed_id3` 只作候選訊號，需局部 OCR 確認後才會採信
-- `.meta.json` 會保留 `streamlink` 的 process `exit_code` 與最後 40 行 stderr，方便追查 `playlist ended`、`stream disconnected`、廣告切流等退出原因
-
 ## 常用指令
 
 啟動：

@@ -134,13 +134,6 @@ In `segment_native` mode, the system now auto-converts the clean output to MP4 i
 - whether the clean MP4 is ready
 - the `exports/` directory path where the MP4 is stored
 
-## Ad Mitigation (Hybrid Mode)
-
-- Without a user token: recording uses the normal public mode
-- With `TWITCH_USER_OAUTH_TOKEN`: the system first tries authenticated capture (best-effort) and falls back automatically if it fails
-- While recording, the system detects ad breaks from `streamlink` output; `timed_id3` is treated only as a candidate signal and must be confirmed by localized OCR before it is trusted
-- `.meta.json` keeps the `streamlink` process `exit_code` and the last 40 lines of stderr so you can trace reasons such as `playlist ended`, `stream disconnected`, or ad-triggered stream switching
-
 ## Common Commands
 
 Start:
